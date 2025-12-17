@@ -1674,24 +1674,6 @@
 
         if (draggingFromMenu) return
 
-        if (e.button === 2) {
-          if (portHit) {
-            wires = wires.filter(
-              (w) =>
-                !(
-                  (w.fromCompId === portHit.component.id &&
-                    w.fromPortId === portHit.port.id) ||
-                  (w.toCompId === portHit.component.id &&
-                    w.toPortId === portHit.port.id)
-                )
-            )
-            return
-          }
-          const hitComp = componentAt(g.x, g.y)
-          if (hitComp) removeComponent(hitComp)
-          return
-        }
-
         if (portHit) {
           draggingWireStart = portHit
           mode = 'CONNECTING'
