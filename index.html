@@ -165,8 +165,9 @@
         border-radius: 50%;
         width: 28px;
         height: 28px;
-        display: grid;
-        place-items: center;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         border: 1px solid #333;
         background: #111;
         color: #fff;
@@ -224,6 +225,26 @@
         font-size: 10px;
         border: 1px solid #334155;
       }
+
+      .context-menu {
+        position: fixed;
+        background: #0f0f0f;
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 6px;
+        z-index: 40;
+        min-width: 160px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      }
+
+      .context-menu.hidden {
+        display: none;
+      }
+
+      .context-menu button {
+        width: 100%;
+        justify-content: flex-start;
+      }
     </style>
   </head>
   <body>
@@ -265,6 +286,8 @@
       </div>
     </div>
 
+    <div class="context-menu hidden" id="ctx-menu"></div>
+
     <script>
       const canvas = document.getElementById('canvas')
       const ctx = canvas.getContext('2d', { alpha: false })
@@ -280,6 +303,7 @@
       const copyBtn = document.getElementById('copy-json')
       const downloadBtn = document.getElementById('download-json')
       const applyLoadBtn = document.getElementById('apply-load')
+      const ctxMenu = document.getElementById('ctx-menu')
 
       const GRID_SIZE = 25
       const PORT_RADIUS = 6
@@ -1267,6 +1291,7 @@
         hud.appendChild(sep)
 
         Object.keys(TOOLS).forEach((key) => {
+          if (customLibrary[key]) return
           const def = TOOLS[key]
           const btn = document.createElement('button')
           const swatch = document.createElement('span')
@@ -1515,6 +1540,58 @@
         }
       }
 
+      function hideContextMenu() {
+        ctxMenu.classList.add('hidden')
+        ctxMenu.innerHTML = ''
+      }
+
+      function showContextMenu(x, y, items) {
+        ctxMenu.innerHTML = ''
+        items.forEach((item) => {
+          const btn = document.createElement('button')
+          btn.innerText = item.label
+          btn.onclick = () => {
+            hideContextMenu()
+            item.action()
+          }
+          ctxMenu.appendChild(btn)
+        })
+        ctxMenu.style.left = `${x}px`
+        ctxMenu.style.top = `${y}px`
+        ctxMenu.classList.remove('hidden')
+      }
+
+      function hitTestWire(clientX, clientY) {
+        const tolerance = 8
+        for (const w of wires) {
+          const fromComp = components.find((c) => c.id === w.fromCompId)
+          const toComp = components.find((c) => c.id === w.toCompId)
+          if (!fromComp || !toComp) continue
+          const a = portPosition(
+            fromComp,
+            fromComp.outputs.find((p) => p.id === w.fromPortId)
+          )
+          const b = portPosition(
+            toComp,
+            toComp.inputs.find((p) => p.id === w.toPortId)
+          )
+          if (!a || !b) continue
+          const dx = b.x - a.x
+          const dy = b.y - a.y
+          const len2 = dx * dx + dy * dy
+          if (len2 === 0) continue
+          const t = Math.max(
+            0,
+            Math.min(1, ((clientX - a.x) * dx + (clientY - a.y) * dy) / len2)
+          )
+          const px = a.x + t * dx
+          const py = a.y + t * dy
+          const dist = Math.hypot(clientX - px, clientY - py)
+          if (dist <= tolerance) return w
+        }
+        return null
+      }
+
       function closeModal() {
         modalBackdrop.classList.add('hidden')
       }
@@ -1587,6 +1664,7 @@
       canvas.addEventListener('pointerdown', (e) => {
         const g = getGrid({ x: e.clientX, y: e.clientY })
         const portHit = hitTestPort(e.clientX, e.clientY)
+        hideContextMenu()
 
         if (mode === 'SELECTING') {
           selectionStart = g
@@ -1717,6 +1795,60 @@
         mode = 'IDLE'
         draggingComp = null
         draggingWireStart = null
+      })
+
+      window.addEventListener('contextmenu', (e) => {
+        e.preventDefault()
+        const g = getGrid({ x: e.clientX, y: e.clientY })
+        const wireHit = hitTestWire(e.clientX, e.clientY)
+        const compHit = componentAt(g.x, g.y)
+        const items = []
+        if (wireHit) {
+          items.push({
+            label: 'Delete wire',
+            action: () => {
+              wires = wires.filter((w) => w !== wireHit)
+            },
+          })
+        }
+        if (compHit) {
+          if (compHit.type === 'SPLITTER' || compHit.type === 'MERGER') {
+            items.push({
+              label: 'Set bus size',
+              action: () => {
+                const next = prompt(
+                  'Bus Width (1-64)',
+                  compHit.properties.busSize ?? 8
+                )
+                if (next !== null) {
+                  compHit.properties.busSize = clampBits(next, 8)
+                  configureComponent(compHit)
+                }
+              },
+            })
+          }
+          if (compHit.properties.bitWidth !== undefined) {
+            items.push({
+              label: 'Set bit width',
+              action: () => {
+                const next = prompt(
+                  'Bit Width (1-64)',
+                  compHit.properties.bitWidth ?? 1
+                )
+                if (next !== null) {
+                  compHit.properties.bitWidth = clampBits(next, 1)
+                  configureComponent(compHit)
+                }
+              },
+            })
+          }
+          items.push({
+            label: 'Delete component',
+            action: () => removeComponent(compHit),
+          })
+        }
+        if (!items.length) return
+        showContextMenu(e.clientX, e.clientY, items)
       })
 
       canvas.addEventListener('dblclick', handleDoubleClick)
