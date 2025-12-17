@@ -1,5 +1,3 @@
----
-
 # OpenCircuit
 
 OpenCircuit is a lightweight, high-performance **digital logic simulator** built entirely in vanilla JavaScript and HTML5 Canvas. Designed for modularity and scalability, it supports multi-bit signal processing, custom integrated circuit (IC) creation, and JSON-based project persistence.
@@ -52,8 +50,6 @@ Open the **Save / Load** menu to generate a JSON representation of your work. Yo
 The engine uses a **masked BigInt architecture** to handle up to 64-bit logic accurately.
 
 The simulation runs on a localized propagation loop, ensuring that state changes ripple through the circuit for up to 8 iterations per frame to resolve feedback loops and complex logic gates.
-
----
 
 ---
 
