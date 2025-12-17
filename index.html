@@ -354,6 +354,7 @@
           this.id = makeId('cmp')
           this.state = false
           this.isLit = false
+          this.overrideValue = null
           this.properties = {
             ...(TOOLS[type]?.defaultProperties || {}),
             ...properties,
@@ -606,6 +607,46 @@
         },
       }
 
+      function registerCustomTool(def) {
+        const ins = def.inputs.length
+        const outs = def.outputs.length
+        const height = Math.max(2, ins, outs)
+        const hue = Math.floor(Math.random() * 360)
+        TOOLS[def.name] = {
+          label: def.name,
+          color: `hsl(${hue},70%,65%)`,
+          w: 3,
+          h: height,
+          defaultProperties: {},
+          setup: (c) => {
+            c.w = 3
+            c.h = height
+            c.inputs = def.inputs.map((p, idx) => {
+              return new Port({
+                id: `in${idx}`,
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: (idx + 1) * (c.h / (ins + 1)),
+                bitWidth: p.bitWidth,
+              })
+            })
+            c.outputs = def.outputs.map((p, idx) => {
+              return new Port({
+                id: `out${idx}`,
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: (idx + 1) * (c.h / (outs + 1)),
+                bitWidth: p.bitWidth,
+              })
+            })
+            c.customName = def.name
+          },
+        }
+        customLibrary[def.name] = def
+      }
+
       function componentAt(gridX, gridY) {
         return components.find(
           (c) =>
@@ -715,6 +756,7 @@
         components.forEach((c) => {
           c.outputs.forEach((p) => (p.value = 0n))
           c.isLit = false
+          c.overrideValue = null
         })
 
         for (let step = 0; step < 8; step++) {
@@ -756,6 +798,9 @@
           case 'INPUT': {
             const bits = comp.outputs[0]?.bitWidth || 1
             const high = (1n << BigInt(bits)) - 1n
+            if (comp.overrideValue !== null && comp.overrideValue !== undefined) {
+              return [maskValue(comp.overrideValue, bits)]
+            }
             return [comp.state ? high : 0n]
           }
           case 'OUTPUT': {
@@ -824,9 +869,90 @@
             })
             return [maskValue(value, comp.properties.busSize || 1)]
           }
-          default:
+          default: {
+            if (customLibrary[comp.type]) {
+              return evaluateCustomComponent(comp, inputs)
+            }
             return []
+          }
         }
+      }
+
+      function cloneCustomInstance(def) {
+        const compMap = new Map()
+        const comps = def.components.map((c) => {
+          const inst = new Component(c.gx, c.gy, c.type, { ...c.properties })
+          inst.id = c.id
+          compMap.set(c.id, inst)
+          return inst
+        })
+        const wList = def.wires.map((w) => ({
+          ...w,
+          value: 0n,
+        }))
+        return { components: comps, wires: wList }
+      }
+
+      function simulateLocal(comps, wireList) {
+        comps.forEach((c) => {
+          c.outputs.forEach((p) => (p.value = 0n))
+          c.isLit = false
+        })
+
+        for (let step = 0; step < 8; step++) {
+          let changed = false
+
+          wireList.forEach((w) => {
+            const fromComp = comps.find((c) => c.id === w.fromCompId)
+            const fromPort = fromComp?.outputs.find((p) => p.id === w.fromPortId)
+            w.value = fromPort ? fromPort.value : 0n
+          })
+
+          comps.forEach((comp) => {
+            const inputs = comp.inputs.map((port) => {
+              const wire = wireList.find(
+                (w) => w.toCompId === comp.id && w.toPortId === port.id
+              )
+              return maskValue(wire ? wire.value : 0n, port.bitWidth)
+            })
+            const outputs = evaluateComponent(comp, inputs)
+            outputs.forEach((val, idx) => {
+              const port = comp.outputs[idx]
+              if (!port) return
+              const masked = maskValue(val, port.bitWidth)
+              if (port.value !== masked) {
+                port.value = masked
+                changed = true
+              }
+            })
+          })
+
+          if (!changed) break
+        }
+      }
+
+      function evaluateCustomComponent(comp, inputs) {
+        const def = customLibrary[comp.type]
+        if (!def) return []
+        if (!comp.subInstance) {
+          comp.subInstance = cloneCustomInstance(def)
+        }
+        const sub = comp.subInstance
+        // inject inputs into mapped internal INPUT components
+        def.inputs.forEach((p, idx) => {
+          const target = sub.components.find((c) => c.id === p.componentId)
+          if (target) target.overrideValue = inputs[idx] ?? 0n
+        })
+        simulateLocal(sub.components, sub.wires)
+        const outputs = def.outputs.map((p) => {
+          const outComp = sub.components.find((c) => c.id === p.componentId)
+          if (!outComp) return 0n
+          const wire = sub.wires.find(
+            (w) => w.toCompId === outComp.id && w.toPortId === 'in'
+          )
+          return wire ? wire.value : 0n
+        })
+        return outputs
       }
 
       function getGrid(clientPos) {
@@ -1200,7 +1326,13 @@
           {
             format: 'OpenLogic',
             version: '1.0',
-            library: [],
+            library: Object.values(customLibrary).map((def) => ({
+              name: def.name,
+              components: def.components,
+              wires: def.wires,
+              inputs: def.inputs,
+              outputs: def.outputs,
+            })),
             main: {
               components: components.map((c) => ({
                 id: c.id,
@@ -1246,8 +1378,23 @@
         if (!data || data.format !== 'OpenLogic') {
           throw new Error('Invalid format')
         }
+        Object.keys(customLibrary).forEach((k) => {
+          delete customLibrary[k]
+          if (TOOLS[k]) delete TOOLS[k]
+        })
         components = []
         wires = []
+        const lib = data.library || []
+        lib.forEach((d) => {
+          if (!d.name) return
+          registerCustomTool({
+            name: d.name,
+            components: d.components || [],
+            wires: d.wires || [],
+            inputs: d.inputs || [],
+            outputs: d.outputs || [],
+          })
+        })
         const list = data.main?.components || []
         list.forEach((c) => {
           const props = { ...(c.properties || {}) }
@@ -1309,6 +1456,13 @@
           minY = Math.min(minY, c.gy)
         })
 
+        const inputNodes = selectedComponents
+          .filter((c) => c.type === 'INPUT')
+          .sort((a, b) => a.gy - b.gy || a.gx - b.gx)
+        const outputNodes = selectedComponents
+          .filter((c) => c.type === 'OUTPUT')
+          .sort((a, b) => a.gy - b.gy || a.gx - b.gx)
+
         const comps = selectedComponents.map((c) => ({
           id: c.id,
           type: c.type,
@@ -1327,36 +1481,28 @@
             bitWidth: w.bitWidth,
           }))
 
-        customLibrary[name] = { components: comps, wires: wireList }
+        const def = {
+          name,
+          components: comps,
+          wires: wireList,
+          inputs: inputNodes.map((c) => ({
+            componentId: c.id,
+            bitWidth: c.properties.bitWidth || 1,
+          })),
+          outputs: outputNodes.map((c) => ({
+            componentId: c.id,
+            bitWidth: c.properties.bitWidth || 1,
+          })),
+        }
+        registerCustomTool(def)
         refreshHUD()
       }
 
       function placeCustom(name, gx, gy) {
         const tmpl = customLibrary[name]
         if (!tmpl) return
-        for (const c of tmpl.components) {
-          if (checkCollision(gx + c.gx, gy + c.gy, c.type)) return
-        }
-        const idMap = new Map()
-        tmpl.components.forEach((c) => {
-          const newComp = new Component(gx + c.gx, gy + c.gy, c.type, { ...c.properties })
-          idMap.set(c.id, newComp.id)
-          components.push(newComp)
-        })
-        tmpl.wires.forEach((w) => {
-          const fromCompId = idMap.get(w.fromCompId)
-          const toCompId = idMap.get(w.toCompId)
-          if (!fromCompId || !toCompId) return
-          wires.push(
-            new Wire({
-              fromCompId,
-              fromPortId: w.fromPortId,
-              toCompId,
-              toPortId: w.toPortId,
-              bitWidth: w.bitWidth,
-            })
-          )
-        })
+        if (checkCollision(gx, gy, name)) return
+        components.push(new Component(gx, gy, name))
       }
 
       function placeFromPalette(gx, gy, type) {
