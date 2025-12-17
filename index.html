@@ -296,6 +296,11 @@
       let mouseGrid = { x: 0, y: 0 }
       let draggingWireStart = null
       let hoverPort = null
+      let draggingFromMenu = false
+      let selectionStart = null
+      let selectionEnd = null
+      let selectedComponents = []
+      const customLibrary = {}
 
       function clampBits(value, fallback = 1) {
         const n = Number(value)
@@ -986,7 +991,7 @@
 
         ctx.save()
         if (isGhost) ctx.globalAlpha = 0.6
-        ctx.fillStyle = '#000'
+        ctx.fillStyle = selectedComponents.includes(comp) ? '#111827' : '#000'
         ctx.fillRect(x, y, w, h)
         ctx.strokeStyle = def.color
         ctx.lineWidth = 2
@@ -1055,11 +1060,29 @@
 
       function drawAllComponents() {
         components.forEach((c) => drawComponent(c))
-        if (placingType) {
+        if (placingType && TOOLS[placingType]) {
           drawComponent(
             new Component(mouseGrid.x, mouseGrid.y, placingType),
             true
           )
+        } else if (placingType && customLibrary[placingType]) {
+          const x = mouseGrid.x * GRID_SIZE + camera.x
+          const y = mouseGrid.y * GRID_SIZE + camera.y
+          const w = GRID_SIZE * 3
+          const h = GRID_SIZE * 2
+          ctx.save()
+          ctx.globalAlpha = 0.6
+          ctx.fillStyle = '#0f172a'
+          ctx.strokeStyle = '#6ee7b7'
+          ctx.lineWidth = 2
+          ctx.fillRect(x, y, w, h)
+          ctx.strokeRect(x, y, w, h)
+          ctx.fillStyle = '#6ee7b7'
+          ctx.font = 'bold 12px "JetBrains Mono"'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(placingType, x + w / 2, y + h / 2)
+          ctx.restore()
         }
       }
 
@@ -1070,6 +1093,19 @@
         drawGrid()
         drawWires()
         drawAllComponents()
+        if (selectionStart && selectionEnd) {
+          const sx = Math.min(selectionStart.x, selectionEnd.x) * GRID_SIZE + camera.x
+          const sy = Math.min(selectionStart.y, selectionEnd.y) * GRID_SIZE + camera.y
+          const ex = (Math.max(selectionStart.x, selectionEnd.x) + 1) * GRID_SIZE + camera.x
+          const ey = (Math.max(selectionStart.y, selectionEnd.y) + 1) * GRID_SIZE + camera.y
+          ctx.strokeStyle = '#fff'
+          ctx.lineWidth = 1
+          ctx.setLineDash([5, 5])
+          ctx.strokeRect(sx, sy, ex - sx, ey - sy)
+          ctx.setLineDash([])
+          ctx.fillStyle = 'rgba(255,255,255,0.08)'
+          ctx.fillRect(sx, sy, ex - sx, ey - sy)
+        }
         requestAnimationFrame(render)
       }
 
@@ -1081,6 +1117,24 @@
         modalBtn.innerText = 'Save / Load'
         modalBtn.onclick = () => openModal('save')
         hud.appendChild(modalBtn)
+
+        const selectBtn = document.createElement('button')
+        selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
+        selectBtn.innerText = '[ ] Select Area'
+        selectBtn.onclick = () => {
+          mode = mode === 'SELECTING' ? 'IDLE' : 'SELECTING'
+          selectionStart = null
+          selectionEnd = null
+          selectedComponents = []
+          refreshHUD()
+        }
+        hud.appendChild(selectBtn)
+
+        const saveCustomBtn = document.createElement('button')
+        saveCustomBtn.className = 'action'
+        saveCustomBtn.innerText = '+ Save Custom'
+        saveCustomBtn.onclick = saveCustomComponent
+        hud.appendChild(saveCustomBtn)
 
         const sep = document.createElement('div')
         sep.className = 'separator'
@@ -1094,13 +1148,35 @@
           swatch.style.backgroundColor = def.color
           btn.appendChild(swatch)
           btn.appendChild(document.createTextNode(def.label))
-          if (placingType === key) btn.classList.add('active')
-          btn.onclick = () => {
-            placingType = placingType === key ? null : key
-            refreshHUD()
+          btn.onpointerdown = (e) => {
+            e.preventDefault()
+            placingType = key
+            draggingFromMenu = true
+            mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
           }
           hud.appendChild(btn)
         })
+
+        if (Object.keys(customLibrary).length) {
+          const sepCustom = document.createElement('div')
+          sepCustom.className = 'separator'
+          hud.appendChild(sepCustom)
+          Object.keys(customLibrary).forEach((key) => {
+            const btn = document.createElement('button')
+            const swatch = document.createElement('span')
+            swatch.className = 'swatch'
+            swatch.style.backgroundColor = '#6ee7b7'
+            btn.appendChild(swatch)
+            btn.appendChild(document.createTextNode(key))
+            btn.onpointerdown = (e) => {
+              e.preventDefault()
+              placingType = key
+              draggingFromMenu = true
+              mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
+            }
+            hud.appendChild(btn)
+          })
+        }
 
         const sep2 = document.createElement('div')
         sep2.className = 'separator'
@@ -1109,13 +1185,14 @@
         const clearBtn = document.createElement('button')
         clearBtn.className = 'danger'
         clearBtn.innerText = 'Clear All'
-        clearBtn.onclick = () => {
-          if (confirm('Reset Board?')) {
-            components = []
-            wires = []
+          clearBtn.onclick = () => {
+            if (confirm('Reset Board?')) {
+              components = []
+              wires = []
+              selectedComponents = []
+            }
           }
-        }
-        hud.appendChild(clearBtn)
+          hud.appendChild(clearBtn)
       }
 
       function serializeProject() {
@@ -1216,6 +1293,82 @@
         updateSaveTextarea()
       }
 
+      function saveCustomComponent() {
+        if (!selectedComponents.length) {
+          alert('Select components first using Select Area.')
+          return
+        }
+        const name = prompt('Custom component name:', `CHIP_${Object.keys(customLibrary).length + 1}`)
+        if (!name) return
+
+        const ids = new Set(selectedComponents.map((c) => c.id))
+        let minX = Infinity
+        let minY = Infinity
+        selectedComponents.forEach((c) => {
+          minX = Math.min(minX, c.gx)
+          minY = Math.min(minY, c.gy)
+        })
+
+        const comps = selectedComponents.map((c) => ({
+          id: c.id,
+          type: c.type,
+          gx: c.gx - minX,
+          gy: c.gy - minY,
+          properties: { ...c.properties },
+        }))
+
+        const wireList = wires
+          .filter((w) => ids.has(w.fromCompId) && ids.has(w.toCompId))
+          .map((w) => ({
+            fromCompId: w.fromCompId,
+            toCompId: w.toCompId,
+            fromPortId: w.fromPortId,
+            toPortId: w.toPortId,
+            bitWidth: w.bitWidth,
+          }))
+
+        customLibrary[name] = { components: comps, wires: wireList }
+        refreshHUD()
+      }
+
+      function placeCustom(name, gx, gy) {
+        const tmpl = customLibrary[name]
+        if (!tmpl) return
+        for (const c of tmpl.components) {
+          if (checkCollision(gx + c.gx, gy + c.gy, c.type)) return
+        }
+        const idMap = new Map()
+        tmpl.components.forEach((c) => {
+          const newComp = new Component(gx + c.gx, gy + c.gy, c.type, { ...c.properties })
+          idMap.set(c.id, newComp.id)
+          components.push(newComp)
+        })
+        tmpl.wires.forEach((w) => {
+          const fromCompId = idMap.get(w.fromCompId)
+          const toCompId = idMap.get(w.toCompId)
+          if (!fromCompId || !toCompId) return
+          wires.push(
+            new Wire({
+              fromCompId,
+              fromPortId: w.fromPortId,
+              toCompId,
+              toPortId: w.toPortId,
+              bitWidth: w.bitWidth,
+            })
+          )
+        })
+      }
+
+      function placeFromPalette(gx, gy, type) {
+        if (customLibrary[type]) {
+          placeCustom(type, gx, gy)
+          return
+        }
+        if (!checkCollision(gx, gy, type)) {
+          components.push(new Component(gx, gy, type))
+        }
+      }
+
       function closeModal() {
         modalBackdrop.classList.add('hidden')
       }
@@ -1289,6 +1442,14 @@
         const g = getGrid({ x: e.clientX, y: e.clientY })
         const portHit = hitTestPort(e.clientX, e.clientY)
 
+        if (mode === 'SELECTING') {
+          selectionStart = g
+          selectionEnd = g
+          return
+        }
+
+        if (draggingFromMenu) return
+
         if (e.button === 2) {
           if (portHit) {
             wires = wires.filter(
@@ -1349,6 +1510,9 @@
       window.addEventListener('pointermove', (e) => {
         mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
         hoverPort = hitTestPort(e.clientX, e.clientY)
+        if (mode === 'SELECTING' && selectionStart) {
+          selectionEnd = mouseGrid
+        }
         if (mode === 'PANNING') {
           camera.x = e.clientX - dragStart.x
           camera.y = e.clientY - dragStart.y
@@ -1359,6 +1523,30 @@
       })
 
       window.addEventListener('pointerup', () => {
+        if (draggingFromMenu && placingType) {
+          placeFromPalette(mouseGrid.x, mouseGrid.y, placingType)
+          draggingFromMenu = false
+          placingType = null
+        }
+
+        if (mode === 'SELECTING' && selectionStart) {
+          const sx = Math.min(selectionStart.x, selectionEnd?.x ?? selectionStart.x)
+          const ex = Math.max(selectionStart.x, selectionEnd?.x ?? selectionStart.x)
+          const sy = Math.min(selectionStart.y, selectionEnd?.y ?? selectionStart.y)
+          const ey = Math.max(selectionStart.y, selectionEnd?.y ?? selectionStart.y)
+          selectedComponents = components.filter((c) => {
+            return (
+              c.gx >= sx &&
+              c.gx + c.w <= ex + 1 &&
+              c.gy >= sy &&
+              c.gy + c.h <= ey + 1
+            )
+          })
+          selectionStart = null
+          selectionEnd = null
+          mode = 'IDLE'
+        }
+
         if (mode === 'CONNECTING' && draggingWireStart) {
           const endPort = hoverPort
           if (endPort && endPort !== draggingWireStart) {
