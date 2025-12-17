@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -11,7 +10,7 @@
     <style>
       @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;800&display=swap');
 
-      code Code download content_copy expand_less * {
+      * {
         margin: 0;
         padding: 0;
         box-sizing: border-box;
@@ -50,7 +49,7 @@
         border-radius: 6px;
         background: rgba(15, 15, 15, 0.9);
         backdrop-filter: blur(8px);
-        width: 160px;
+        width: 180px;
         z-index: 10;
         max-height: calc(100vh - 30px);
         overflow-y: auto;
@@ -65,6 +64,10 @@
       .hud::-webkit-scrollbar-thumb {
         background: #444;
         border-radius: 2px;
+      }
+
+      .hidden {
+        display: none !important;
       }
 
       button {
@@ -130,527 +133,694 @@
         border-radius: 2px;
         display: inline-block;
       }
+
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 30;
+      }
+
+      .modal-backdrop.hidden {
+        display: none;
+      }
+
+      .modal {
+        background: #0f0f0f;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 16px;
+        width: min(880px, 95vw);
+        box-shadow: 0 15px 50px rgba(0, 0, 0, 0.5);
+        position: relative;
+      }
+
+      .modal .close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        border-radius: 50%;
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        border: 1px solid #333;
+        background: #111;
+        color: #fff;
+        cursor: pointer;
+      }
+
+      .modal-tabs {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .tab-button {
+        flex: 1;
+        justify-content: center;
+      }
+
+      .tab-button.active {
+        background: #1f1f2a;
+        border-color: #556;
+        color: #fff;
+      }
+
+      .modal textarea {
+        width: 100%;
+        min-height: 220px;
+        background: #0a0a0a;
+        color: #e5e5e5;
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 12px;
+        font-family: 'JetBrains Mono', monospace;
+        resize: vertical;
+      }
+
+      .modal .divider {
+        text-align: center;
+        margin: 12px 0;
+        color: #666;
+        font-size: 12px;
+      }
+
+      .modal .actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .badge {
+        background: #1f2937;
+        color: #cbd5f5;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 10px;
+        border: 1px solid #334155;
+      }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
     <div class="hud" id="hud"></div>
 
-    code Code download content_copy expand_less
+    <div class="modal-backdrop hidden" id="modal-backdrop">
+      <div class="modal">
+        <button class="close" id="modal-close" aria-label="Close modal">✕</button>
+        <div class="modal-tabs">
+          <button class="tab-button active" id="tab-save" data-tab="save">
+            Save Project
+          </button>
+          <button class="tab-button" id="tab-load" data-tab="load">
+            Load Project
+          </button>
+        </div>
+
+        <div class="modal-content" data-tab="save">
+          <textarea id="save-json" readonly></textarea>
+          <div class="actions">
+            <button id="copy-json">Copy JSON</button>
+            <button id="download-json">Save as File</button>
+          </div>
+        </div>
+
+        <div class="modal-content hidden" data-tab="load">
+          <textarea
+            id="load-json"
+            placeholder="Paste JSON here..."
+            aria-label="Load JSON"
+          ></textarea>
+          <div class="divider">--- OR ---</div>
+          <input type="file" id="load-file" accept=".json" />
+          <div class="actions">
+            <button id="apply-load">Load Circuit</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <script>
       const canvas = document.getElementById('canvas')
       const ctx = canvas.getContext('2d', { alpha: false })
       const hud = document.getElementById('hud')
 
-      const GRID_SIZE = 25
+      const modalBackdrop = document.getElementById('modal-backdrop')
+      const modalClose = document.getElementById('modal-close')
+      const tabSave = document.getElementById('tab-save')
+      const tabLoad = document.getElementById('tab-load')
+      const saveTextarea = document.getElementById('save-json')
+      const loadTextarea = document.getElementById('load-json')
+      const loadFileInput = document.getElementById('load-file')
+      const copyBtn = document.getElementById('copy-json')
+      const downloadBtn = document.getElementById('download-json')
+      const applyLoadBtn = document.getElementById('apply-load')
 
-      const TOOLS = {
-        WIRE: { label: 'WIRE', color: '#888', w: 1, h: 1, ins: 0, outs: 0 },
-        INPUT: { label: 'IN', color: '#3b82f6', w: 2, h: 2, ins: 0, outs: 1 },
-        OUTPUT: { label: 'OUT', color: '#22c55e', w: 2, h: 2, ins: 1, outs: 0 },
-        NOT: { label: 'NOT', color: '#ef4444', w: 2, h: 2, ins: 1, outs: 1 },
-        AND: { label: 'AND', color: '#eab308', w: 2, h: 2, ins: 2, outs: 1 },
-        NAND: { label: 'NAND', color: '#14b8a6', w: 2, h: 2, ins: 2, outs: 1 },
-        OR: { label: 'OR', color: '#a855f7', w: 2, h: 2, ins: 2, outs: 1 },
-        NOR: { label: 'NOR', color: '#f97316', w: 2, h: 2, ins: 2, outs: 1 },
-        XOR: { label: 'XOR', color: '#ec4899', w: 2, h: 2, ins: 2, outs: 1 },
-        XNOR: { label: 'XNOR', color: '#6366f1', w: 2, h: 2, ins: 2, outs: 1 },
-      }
+      const GRID_SIZE = 25
+      const PORT_RADIUS = 6
+      const MAX_BITS = 64
 
       let components = []
-      let wires = new Map()
-      let wireStates = new Map()
-      let customDefs = {}
-
+      let wires = []
       let camera = { x: 0, y: 0 }
       let mode = 'IDLE'
-      let dragStart = { x: 0, y: 0 }
-      let newCompType = null
+      let placingType = null
       let draggingComp = null
-      let draggingWire = null
       let dragOffset = { x: 0, y: 0 }
-      let initialPos = { x: 0, y: 0 }
+      let dragStart = { x: 0, y: 0 }
       let mouseGrid = { x: 0, y: 0 }
+      let draggingWireStart = null
+      let hoverPort = null
 
-      let selectionStart = null
-      let selectionEnd = null
-      let selectedComponents = []
+      function clampBits(value, fallback = 1) {
+        const n = Number(value)
+        if (!Number.isFinite(n)) return fallback
+        return Math.min(MAX_BITS, Math.max(1, Math.floor(n)))
+      }
+
+      function maskValue(value, bits) {
+        const b = BigInt(clampBits(bits))
+        const mask = (1n << b) - 1n
+        return BigInt(value ?? 0) & mask
+      }
+
+      function toBig(value) {
+        return typeof value === 'bigint' ? value : BigInt(value ?? 0)
+      }
+
+      function makeId(prefix) {
+        return `${prefix}_${Math.random().toString(36).slice(2, 9)}`
+      }
+
+      class Port {
+        constructor({ id, parentId, type, relativeX, relativeY, bitWidth = 1 }) {
+          this.id = id
+          this.parentId = parentId
+          this.type = type
+          this.relativeX = relativeX
+          this.relativeY = relativeY
+          this.bitWidth = clampBits(bitWidth)
+          this.value = 0n
+        }
+      }
+
+      class Wire {
+        constructor({ id, fromCompId, fromPortId, toCompId, toPortId, bitWidth }) {
+          this.id = id || makeId('wire')
+          this.fromCompId = fromCompId
+          this.fromPortId = fromPortId
+          this.toCompId = toCompId
+          this.toPortId = toPortId
+          this.bitWidth = clampBits(bitWidth)
+          this.value = 0n
+        }
+      }
 
       class Component {
-        constructor(gx, gy, type) {
+        constructor(gx, gy, type, properties = {}) {
           this.gx = gx
           this.gy = gy
           this.type = type
-          this.id = Math.random().toString(36).substr(2, 9)
+          this.id = makeId('cmp')
           this.state = false
           this.isLit = false
-
-          if (customDefs[type]) {
-            this.subCircuit = this.createSubCircuit(customDefs[type])
+          this.properties = {
+            ...(TOOLS[type]?.defaultProperties || {}),
+            ...properties,
           }
-        }
-
-        createSubCircuit(def) {
-          const subComponents = def.components.map((c) => {
-            const copy = new Component(c.gx, c.gy, c.type)
-            return copy
-          })
-          const subWires = new Map(def.wires)
-          return {
-            components: subComponents,
-            wires: subWires,
-            wireStates: new Map(),
-          }
+          this.inputs = []
+          this.outputs = []
+          this.w = TOOLS[type]?.w || 2
+          this.h = TOOLS[type]?.h || 2
+          configureComponent(this)
         }
       }
 
-      function getWireState(map, gx, gy) {
-        return map.get(`${gx},${gy}`) || false
+      function configureComponent(comp) {
+        const def = TOOLS[comp.type]
+        if (!def) return
+        comp.inputs = []
+        comp.outputs = []
+        comp.w = def.w
+        comp.h = def.h
+        def.setup(comp)
+        pruneWiresForComponent(comp)
       }
 
-      function runSimulation(comps, wMap, wStates) {
-        let nextGateStates = new Map()
-
-        comps.forEach((c) => {
-          const def = TOOLS[c.type]
-          if (customDefs[c.type]) {
-            const sub = c.subCircuit
-            const subDef = customDefs[c.type]
-            subDef.inputNodes.forEach((node, idx) => {
-              const extVal = getWireState(wStates, c.gx - 1, c.gy + idx * 2)
-              const intComp = sub.components[node.internalIndex]
-              if (intComp) intComp.state = extVal
-            })
-
-            runSimulation(sub.components, sub.wires, sub.wireStates)
-
-            subDef.outputNodes.forEach((node, idx) => {
-              const intComp = sub.components[node.internalIndex]
-              if (intComp && intComp.isLit) {
-                nextGateStates.set(`${c.gx + def.w},${c.gy + idx * 2}`, true)
-              }
-            })
-          } else if (c.type === 'OUTPUT') {
-            c.isLit = getWireState(wStates, c.gx - 1, c.gy)
-          } else if (c.type !== 'WIRE' && c.type !== 'INPUT') {
-            const in1 = getWireState(wStates, c.gx - 1, c.gy)
-            const in2 = getWireState(wStates, c.gx - 1, c.gy + 1)
-            let active = false
-            if (c.type === 'NOT') active = !in1
-            if (c.type === 'AND') active = in1 && in2
-            if (c.type === 'NAND') active = !(in1 && in2)
-            if (c.type === 'OR') active = in1 || in2
-            if (c.type === 'NOR') active = !(in1 || in2)
-            if (c.type === 'XOR') active = !!in1 !== !!in2
-            if (c.type === 'XNOR') active = !!in1 === !!in2
-
-            if (active) {
-              nextGateStates.set(`${c.gx + def.w},${c.gy}`, true)
+      const TOOLS = {
+        INPUT: {
+          label: 'IN',
+          color: '#3b82f6',
+          w: 2,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        OUTPUT: {
+          label: 'OUT',
+          color: '#22c55e',
+          w: 2,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.inputs = [
+              new Port({
+                id: 'in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        NOT: {
+          label: 'NOT',
+          color: '#ef4444',
+          w: 2,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.inputs = [
+              new Port({
+                id: 'in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        AND: {
+          label: 'AND',
+          color: '#eab308',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.inputs = [
+              new Port({
+                id: 'in0',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: 0.6,
+                bitWidth: bits,
+              }),
+              new Port({
+                id: 'in1',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h - 0.6,
+                bitWidth: bits,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        NAND: {
+          label: 'NAND',
+          color: '#14b8a6',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        OR: {
+          label: 'OR',
+          color: '#a855f7',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        NOR: {
+          label: 'NOR',
+          color: '#f97316',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        XOR: {
+          label: 'XOR',
+          color: '#ec4899',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        XNOR: {
+          label: 'XNOR',
+          color: '#6366f1',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        SPLITTER: {
+          label: 'SPLIT',
+          color: '#0ea5e9',
+          w: 2,
+          h: 2,
+          defaultProperties: { busSize: 8 },
+          setup: (c) => {
+            const count =
+              clampBits(c.properties.busSize ?? c.properties.outputs ?? 8) || 8
+            c.properties.busSize = count
+            c.h = Math.max(2, count)
+            const spacing = c.h / (count + 1)
+            c.inputs = [
+              new Port({
+                id: 'in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2,
+                bitWidth: count,
+              }),
+            ]
+            c.outputs = []
+            for (let i = 0; i < count; i++) {
+              c.outputs.push(
+                new Port({
+                  id: `out${i}`,
+                  parentId: c.id,
+                  type: 'OUT',
+                  relativeX: c.w,
+                  relativeY: spacing * (i + 1),
+                  bitWidth: 1,
+                })
+              )
             }
-          }
-        })
-
-        let currentWireState = new Map()
-        let queue = []
-        let visited = new Set()
-
-        comps.forEach((c) => {
-          const def = TOOLS[c.type]
-          if (c.type === 'INPUT' && c.state) {
-            const key = `${c.gx + def.w},${c.gy}`
-            if (!currentWireState.has(key)) {
-              currentWireState.set(key, true)
-              queue.push({ x: c.gx + def.w, y: c.gy })
+          },
+        },
+        MERGER: {
+          label: 'MERGE',
+          color: '#f59e0b',
+          w: 2,
+          h: 2,
+          defaultProperties: { busSize: 8 },
+          setup: (c) => {
+            const count =
+              clampBits(c.properties.busSize ?? c.properties.inputs ?? 8) || 8
+            c.properties.busSize = count
+            c.h = Math.max(2, count)
+            const spacing = c.h / (count + 1)
+            c.inputs = []
+            for (let i = 0; i < count; i++) {
+              c.inputs.push(
+                new Port({
+                  id: `in${i}`,
+                  parentId: c.id,
+                  type: 'IN',
+                  relativeX: 0,
+                  relativeY: spacing * (i + 1),
+                  bitWidth: 1,
+                })
+              )
             }
-          }
-        })
-
-        nextGateStates.forEach((val, key) => {
-          if (val && !currentWireState.has(key)) {
-            currentWireState.set(key, true)
-            const [gx, gy] = key.split(',').map(Number)
-            queue.push({ x: gx, y: gy })
-          }
-        })
-
-        while (queue.length > 0) {
-          const curr = queue.shift()
-          const key = `${curr.x},${curr.y}`
-          if (visited.has(key)) continue
-          visited.add(key)
-
-          const neighbors = [
-            { x: curr.x + 1, y: curr.y },
-            { x: curr.x - 1, y: curr.y },
-            { x: curr.x, y: curr.y + 1 },
-            { x: curr.x, y: curr.y - 1 },
-          ]
-
-          neighbors.forEach((n) => {
-            const nKey = `${n.x},${n.y}`
-            if (checkConnectivity(n.x, n.y, comps, wMap)) {
-              if (!currentWireState.has(nKey)) {
-                currentWireState.set(nKey, true)
-                queue.push(n)
-              }
-            }
-          })
-        }
-
-        wStates.clear()
-        currentWireState.forEach((v, k) => wStates.set(k, v))
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: count,
+              }),
+            ]
+          },
+        },
       }
 
-      function checkConnectivity(gx, gy, comps, wMap) {
-        if (wMap.has(`${gx},${gy}`)) return true
-        return comps.some((c) => {
-          const def = TOOLS[c.type]
-          if (customDefs[c.type]) {
-            if (gx === c.gx - 1) {
-              const dy = gy - c.gy
-              if (dy >= 0 && dy < def.ins * 2 && dy % 2 === 0) return true
-            }
-            if (gx === c.gx + def.w) {
-              const dy = gy - c.gy
-              if (dy >= 0 && dy < def.outs * 2 && dy % 2 === 0) return true
-            }
-            return false
-          }
-          if (def.ins >= 1 && gx === c.gx - 1 && gy === c.gy) return true
-          if (def.ins >= 2 && gx === c.gx - 1 && gy === c.gy + 1) return true
-          if (def.outs >= 1 && gx === c.gx + def.w && gy === c.gy) return true
-          return false
-        })
-      }
-
-      function simulate() {
-        runSimulation(components, wires, wireStates)
-      }
-
-      function shouldConnect(x1, y1, x2, y2) {
-        const hasWire1 = wires.has(`${x1},${y1}`)
-        const hasWire2 = wires.has(`${x2},${y2}`)
-        if (x1 === x2 && y1 === y2) return true
-        if (!hasWire1 && !hasWire2) return false
-
-        return (
-          checkConnectivity(x1, y1, components, wires) &&
-          checkConnectivity(x2, y2, components, wires)
+      function componentAt(gridX, gridY) {
+        return components.find(
+          (c) =>
+            gridX >= c.gx &&
+            gridX <= c.gx + c.w &&
+            gridY >= c.gy &&
+            gridY <= c.gy + c.h
         )
       }
 
       function checkCollision(gx, gy, type, excludeId = null) {
         const def = TOOLS[type]
+        if (!def) return false
         const w = def.w
         const h = def.h
-        const bodyCollision = components.some((c) => {
+        return components.some((c) => {
           if (c.id === excludeId) return false
-          const cDef = TOOLS[c.type]
           return (
-            gx < c.gx + cDef.w &&
+            gx < c.gx + c.w &&
             gx + w > c.gx &&
-            gy < c.gy + cDef.h &&
+            gy < c.gy + c.h &&
             gy + h > c.gy
           )
         })
-        return bodyCollision
       }
 
-      function createCustomComponent() {
-        if (!selectedComponents.length) {
-          alert("Select components first using 'Select Area'")
-          return
+      function getPort(compId, portId) {
+        const comp = components.find((c) => c.id === compId)
+        if (!comp) return null
+        return [...comp.inputs, ...comp.outputs].find((p) => p.id === portId)
+      }
+
+      function portPosition(comp, port) {
+        return {
+          x: (comp.gx + port.relativeX) * GRID_SIZE + camera.x,
+          y: (comp.gy + port.relativeY) * GRID_SIZE + camera.y,
         }
+      }
 
-        let minX = Infinity,
-          minY = Infinity,
-          maxX = -Infinity,
-          maxY = -Infinity
-
-        selectedComponents.forEach((c) => {
-          const def = TOOLS[c.type]
-          minX = Math.min(minX, c.gx)
-          minY = Math.min(minY, c.gy)
-          maxX = Math.max(maxX, c.gx + def.w)
-          maxY = Math.max(maxY, c.gy + def.h)
-        })
-
-        let selectedWires = new Map()
-
-        if (selectionStart && selectionEnd) {
-          const sx = Math.min(selectionStart.x, selectionEnd.x)
-          const ex = Math.max(selectionStart.x, selectionEnd.x)
-          const sy = Math.min(selectionStart.y, selectionEnd.y)
-          const ey = Math.max(selectionStart.y, selectionEnd.y)
-
-          wires.forEach((_, key) => {
-            const [wx, wy] = key.split(',').map(Number)
-            if (wx >= sx && wx <= ex && wy >= sy && wy <= ey) {
-              selectedWires.set(`${wx - minX},${wy - minY}`, true)
+      function hitTestPort(clientX, clientY) {
+        let hit = null
+        components.forEach((comp) => {
+          const ports = [...comp.inputs, ...comp.outputs]
+          ports.forEach((port) => {
+            const pos = portPosition(comp, port)
+            const dx = clientX - pos.x
+            const dy = clientY - pos.y
+            if (Math.hypot(dx, dy) <= PORT_RADIUS + 4) {
+              hit = { component: comp, port }
             }
           })
-        }
-
-        let normalizedComps = selectedComponents.map((c) => {
-          return {
-            type: c.type,
-            gx: c.gx - minX,
-            gy: c.gy - minY,
-          }
         })
-
-        let inputs = normalizedComps
-          .filter((c) => c.type === 'INPUT')
-          .sort((a, b) => a.gy - b.gy)
-        let outputs = normalizedComps
-          .filter((c) => c.type === 'OUTPUT')
-          .sort((a, b) => a.gy - b.gy)
-
-        const inputNodes = inputs.map((c) => ({
-          internalIndex: normalizedComps.indexOf(c),
-        }))
-        const outputNodes = outputs.map((c) => ({
-          internalIndex: normalizedComps.indexOf(c),
-        }))
-
-        const name = prompt(
-          'Component Name:',
-          'CHIP' + Object.keys(customDefs).length
-        )
-        if (!name) return
-
-        const hue = Math.floor(Math.random() * 360)
-        const color = `hsl(${hue}, 70%, 60%)`
-        const compW = 4
-        const compH = Math.max(2, inputs.length * 2, outputs.length * 2)
-
-        customDefs[name] = {
-          components: normalizedComps,
-          wires: selectedWires,
-          inputNodes: inputNodes,
-          outputNodes: outputNodes,
-        }
-
-        TOOLS[name] = {
-          label: name,
-          color: color,
-          w: compW,
-          h: compH,
-          ins: inputs.length,
-          outs: outputs.length,
-        }
-
-        mode = 'IDLE'
-        selectedComponents = []
-        selectionStart = null
-        selectionEnd = null
-        refreshHUD()
+        return hit
       }
 
-      function drawGrid() {
-        ctx.strokeStyle = '#1a1a1a'
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        const offX = camera.x % GRID_SIZE
-        const offY = camera.y % GRID_SIZE
-        for (let x = offX; x < canvas.width; x += GRID_SIZE) {
-          ctx.moveTo(x + 0.5, 0)
-          ctx.lineTo(x + 0.5, canvas.height)
-        }
-        for (let y = offY; y < canvas.height; y += GRID_SIZE) {
-          ctx.moveTo(0, y + 0.5)
-          ctx.lineTo(canvas.width, y + 0.5)
-        }
-        ctx.stroke()
-      }
-
-      function drawWireSegment(gx, gy, isPowered, activeColor, activeWidth) {
-        const px = gx * GRID_SIZE + camera.x + GRID_SIZE / 2
-        const py = gy * GRID_SIZE + camera.y + GRID_SIZE / 2
-
-        ctx.strokeStyle = isPowered ? activeColor : '#555'
-        ctx.lineWidth = isPowered ? activeWidth : 2
-        ctx.shadowBlur = isPowered ? 8 : 0
-        ctx.shadowColor = '#ffffaa'
-
-        const u = shouldConnect(gx, gy, gx, gy - 1)
-        const d = shouldConnect(gx, gy, gx, gy + 1)
-        const l = shouldConnect(gx, gy, gx - 1, gy)
-        const r = shouldConnect(gx, gy, gx + 1, gy)
-
-        ctx.beginPath()
-        if (u) {
-          ctx.moveTo(px, py)
-          ctx.lineTo(px, py - GRID_SIZE / 2)
-        }
-        if (d) {
-          ctx.moveTo(px, py)
-          ctx.lineTo(px, py + GRID_SIZE / 2)
-        }
-        if (l) {
-          ctx.moveTo(px, py)
-          ctx.lineTo(px - GRID_SIZE / 2, py)
-        }
-        if (r) {
-          ctx.moveTo(px, py)
-          ctx.lineTo(px + GRID_SIZE / 2, py)
-        }
-
-        if (!u && !d && !l && !r) {
-          ctx.moveTo(px - 4, py)
-          ctx.lineTo(px + 4, py)
-        }
-        ctx.stroke()
-
-        const neighbors = (u ? 1 : 0) + (d ? 1 : 0) + (l ? 1 : 0) + (r ? 1 : 0)
-        const isStraight = (u && d && !l && !r) || (l && r && !u && !d)
-
-        if (
-          neighbors > 2 ||
-          (neighbors === 2 && !isStraight) ||
-          neighbors === 1
-        ) {
-          ctx.fillStyle = isPowered ? activeColor : '#555'
-          ctx.beginPath()
-          ctx.arc(px, py, isPowered ? 4 : 3, 0, Math.PI * 2)
-          ctx.fill()
-        }
-        ctx.shadowBlur = 0
-      }
-
-      function drawWires() {
-        ctx.lineCap = 'round'
-        const now = Date.now()
-        const pulse = (Math.sin(now / 150) + 1) / 2
-        const activeColor = `rgba(255, 255, 120, ${0.7 + pulse * 0.3})`
-        const activeWidth = 2 + pulse * 1.5
-
-        wires.forEach((_, key) => {
-          const [gx, gy] = key.split(',').map(Number)
-          drawWireSegment(gx, gy, wireStates.get(key), activeColor, activeWidth)
+      function pruneWiresForComponent(comp) {
+        const inIds = new Set(comp.inputs.map((p) => p.id))
+        const outIds = new Set(comp.outputs.map((p) => p.id))
+        wires = wires.filter((w) => {
+          if (w.toCompId === comp.id && !inIds.has(w.toPortId)) return false
+          if (w.fromCompId === comp.id && !outIds.has(w.fromPortId)) return false
+          const fromPort = getPort(w.fromCompId, w.fromPortId)
+          const toPort = getPort(w.toCompId, w.toPortId)
+          if (!fromPort || !toPort) return false
+          return fromPort.bitWidth === toPort.bitWidth
         })
       }
 
-      function drawComponent(c, isGhost = false) {
-        if (c.type === 'WIRE') {
-          drawWireSegment(c.gx, c.gy, false, '#fff', 2)
+      function tryConnectPorts(a, b) {
+        let from = a
+        let to = b
+        if (a.port.type === 'IN' && b.port.type === 'OUT') {
+          from = b
+          to = a
+        }
+        if (from.port.type !== 'OUT' || to.port.type !== 'IN') return
+        if (from.component.id === to.component.id) return
+        if (from.port.bitWidth !== to.port.bitWidth) {
+          alert('Bit-widths must match to connect these ports.')
           return
         }
 
-        const def = TOOLS[c.type]
-        const x = c.gx * GRID_SIZE + camera.x
-        const y = c.gy * GRID_SIZE + camera.y
-        const w = def.w * GRID_SIZE
-        const h = def.h * GRID_SIZE
+        wires = wires.filter(
+          (w) => !(w.toCompId === to.component.id && w.toPortId === to.port.id)
+        )
 
-        if (isGhost) ctx.globalAlpha = 0.6
-        if (isGhost && checkCollision(c.gx, c.gy, c.type))
-          ctx.fillStyle = 'rgba(255, 0, 0, 0.5)'
-        else if (selectedComponents.includes(c)) ctx.fillStyle = '#445'
-        else ctx.fillStyle = '#000'
-
-        ctx.save()
-
-        const now = Date.now()
-        const pulse = (Math.sin(now / 150) + 1) / 2
-        const activeColor = `rgba(255, 255, 120, ${0.7 + pulse * 0.3})`
-        const activeWidth = 2 + pulse * 1.5
-
-        const drawPin = (pgx, pgy) => {
-          const isPowered = wireStates.get(`${pgx},${pgy}`)
-          drawWireSegment(pgx, pgy, isPowered, activeColor, activeWidth)
-        }
-
-        if (customDefs[c.type]) {
-          for (let i = 0; i < def.ins; i++) drawPin(c.gx - 1, c.gy + i * 2)
-          for (let i = 0; i < def.outs; i++) drawPin(c.gx + def.w, c.gy + i * 2)
-        } else {
-          if (def.ins >= 1) drawPin(c.gx - 1, c.gy)
-          if (def.ins >= 2) drawPin(c.gx - 1, c.gy + 1)
-          if (def.outs >= 1) drawPin(c.gx + def.w, c.gy)
-        }
-
-        ctx.restore()
-
-        ctx.fillRect(x, y, w, h)
-        ctx.strokeStyle = def.color
-        ctx.lineWidth = 2
-        ctx.strokeRect(x, y, w, h)
-
-        ctx.fillStyle = def.color
-        ctx.font = 'bold 12px "JetBrains Mono"'
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'middle'
-
-        if (c.type === 'INPUT') {
-          const pad = 8
-          ctx.fillStyle = '#000'
-          ctx.fillRect(x + pad, y + pad, w - pad * 2, h - pad * 2)
-          if (c.state) {
-            ctx.fillStyle = '#4f4'
-            ctx.fillRect(
-              x + pad + 2,
-              y + pad + 2,
-              w - pad * 2 - 4,
-              h - pad * 2 - 4
-            )
-            ctx.fillStyle = '#fff'
-            ctx.fillText('ON', x + w / 2, y + h / 2)
-          } else {
-            ctx.fillStyle = '#333'
-            ctx.fillText('OFF', x + w / 2, y + h / 2)
-          }
-        } else if (c.type === 'OUTPUT') {
-          ctx.beginPath()
-          ctx.arc(x + w / 2, y + h / 2, 12, 0, Math.PI * 2)
-          ctx.fillStyle = '#000'
-          ctx.fill()
-          ctx.beginPath()
-          ctx.arc(x + w / 2, y + h / 2, 8, 0, Math.PI * 2)
-          if (c.isLit) {
-            ctx.fillStyle = '#ffff00'
-            ctx.shadowColor = '#ffff00'
-            ctx.shadowBlur = 20
-          } else {
-            ctx.fillStyle = '#333'
-          }
-          ctx.fill()
-          ctx.shadowBlur = 0
-        } else {
-          ctx.fillText(def.label, x + w / 2, y + h / 2)
-        }
-
-        if (isGhost) ctx.globalAlpha = 1.0
+        wires.push(
+          new Wire({
+            fromCompId: from.component.id,
+            fromPortId: from.port.id,
+            toCompId: to.component.id,
+            toPortId: to.port.id,
+            bitWidth: from.port.bitWidth,
+          })
+        )
       }
 
-      function render() {
-        simulate()
-        ctx.fillStyle = '#0f0f0f'
-        ctx.fillRect(0, 0, canvas.width, canvas.height)
-        drawGrid()
-        drawWires()
-        for (const c of components) drawComponent(c)
-        if (mode === 'DRAGGING_NEW' && newCompType) {
-          drawComponent(
-            { gx: mouseGrid.x, gy: mouseGrid.y, type: newCompType },
-            true
-          )
+      function removeComponent(comp) {
+        wires = wires.filter(
+          (w) => w.fromCompId !== comp.id && w.toCompId !== comp.id
+        )
+        const idx = components.indexOf(comp)
+        if (idx >= 0) components.splice(idx, 1)
+      }
+
+      function simulate() {
+        components.forEach((c) => {
+          c.outputs.forEach((p) => (p.value = 0n))
+          c.isLit = false
+        })
+
+        for (let step = 0; step < 8; step++) {
+          let changed = false
+
+          wires.forEach((w) => {
+            const fromComp = components.find((c) => c.id === w.fromCompId)
+            const fromPort = fromComp?.outputs.find(
+              (p) => p.id === w.fromPortId
+            )
+            w.value = fromPort ? fromPort.value : 0n
+          })
+
+          components.forEach((comp) => {
+            const inputs = comp.inputs.map((port) => {
+              const wire = wires.find(
+                (w) => w.toCompId === comp.id && w.toPortId === port.id
+              )
+              return maskValue(wire ? wire.value : 0n, port.bitWidth)
+            })
+            const outputs = evaluateComponent(comp, inputs)
+            outputs.forEach((val, idx) => {
+              const port = comp.outputs[idx]
+              if (!port) return
+              const masked = maskValue(val, port.bitWidth)
+              if (port.value !== masked) {
+                port.value = masked
+                changed = true
+              }
+            })
+          })
+
+          if (!changed) break
         }
+      }
 
-        if (mode === 'SELECTING' && selectionStart) {
-          const mx = mouseGrid.x * GRID_SIZE + camera.x
-          const my = mouseGrid.y * GRID_SIZE + camera.y
-          const sx = selectionStart.x * GRID_SIZE + camera.x
-          const sy = selectionStart.y * GRID_SIZE + camera.y
-
-          ctx.strokeStyle = '#fff'
-          ctx.lineWidth = 1
-          ctx.setLineDash([5, 5])
-          ctx.strokeRect(sx, sy, mx - sx, my - sy)
-          ctx.setLineDash([])
-
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.1)'
-          ctx.fillRect(sx, sy, mx - sx, my - sy)
+      function evaluateComponent(comp, inputs) {
+        switch (comp.type) {
+          case 'INPUT': {
+            const bits = comp.outputs[0]?.bitWidth || 1
+            const high = (1n << BigInt(bits)) - 1n
+            return [comp.state ? high : 0n]
+          }
+          case 'OUTPUT': {
+            comp.isLit = (inputs[0] ?? 0n) !== 0n
+            return []
+          }
+          case 'NOT': {
+            const port = comp.outputs[0]
+            const result = ~toBig(inputs[0] ?? 0n)
+            return [maskValue(result, port?.bitWidth || 1)]
+          }
+          case 'AND': {
+            const port = comp.outputs[0]
+            const val = inputs.reduce(
+              (acc, cur) => acc & toBig(cur ?? 0n),
+              toBig(inputs[0] ?? 0n)
+            )
+            return [maskValue(val, port?.bitWidth || 1)]
+          }
+          case 'NAND': {
+            const [res] = evaluateComponent(
+              { ...comp, type: 'AND' },
+              inputs
+            )
+            const port = comp.outputs[0]
+            return [maskValue(~toBig(res ?? 0n), port?.bitWidth || 1)]
+          }
+          case 'OR': {
+            const port = comp.outputs[0]
+            const val = inputs.reduce(
+              (acc, cur) => acc | toBig(cur ?? 0n),
+              toBig(inputs[0] ?? 0n)
+            )
+            return [maskValue(val, port?.bitWidth || 1)]
+          }
+          case 'NOR': {
+            const [res] = evaluateComponent({ ...comp, type: 'OR' }, inputs)
+            const port = comp.outputs[0]
+            return [maskValue(~toBig(res ?? 0n), port?.bitWidth || 1)]
+          }
+          case 'XOR': {
+            const port = comp.outputs[0]
+            const val = inputs.reduce(
+              (acc, cur) => acc ^ toBig(cur ?? 0n),
+              toBig(inputs[0] ?? 0n)
+            )
+            return [maskValue(val, port?.bitWidth || 1)]
+          }
+          case 'XNOR': {
+            const [res] = evaluateComponent({ ...comp, type: 'XOR' }, inputs)
+            const port = comp.outputs[0]
+            return [maskValue(~toBig(res ?? 0n), port?.bitWidth || 1)]
+          }
+          case 'SPLITTER': {
+            const inputVal = toBig(inputs[0] ?? 0n)
+            return comp.outputs.map((_, idx) =>
+              maskValue(inputVal >> BigInt(idx), 1)
+            )
+          }
+          case 'MERGER': {
+            let value = 0n
+            comp.inputs.forEach((_, idx) => {
+              if ((toBig(inputs[idx] ?? 0n) & 1n) === 1n) {
+                value |= 1n << BigInt(idx)
+              }
+            })
+            return [maskValue(value, comp.properties.busSize || 1)]
+          }
+          default:
+            return []
         }
       }
 
@@ -661,25 +831,239 @@
         }
       }
 
+      function drawGrid() {
+        ctx.strokeStyle = '#1f1f1f'
+        ctx.lineWidth = 1
+
+        const startX = ((-camera.x / GRID_SIZE) | 0) * GRID_SIZE + camera.x
+        const startY = ((-camera.y / GRID_SIZE) | 0) * GRID_SIZE + camera.y
+
+        for (let x = startX; x < canvas.width; x += GRID_SIZE) {
+          ctx.beginPath()
+          ctx.moveTo(x, 0)
+          ctx.lineTo(x, canvas.height)
+          ctx.stroke()
+        }
+
+        for (let y = startY; y < canvas.height; y += GRID_SIZE) {
+          ctx.beginPath()
+          ctx.moveTo(0, y)
+          ctx.lineTo(canvas.width, y)
+          ctx.stroke()
+        }
+      }
+
+      function drawBadge(x, y, text, color) {
+        const pad = 6
+        ctx.fillStyle = color
+        ctx.strokeStyle = '#0f0f0f'
+        ctx.lineWidth = 1
+        const width = ctx.measureText(text).width + pad * 2
+        const height = 16
+        ctx.beginPath()
+        ctx.roundRect(x - width / 2, y - height / 2, width, height, 6)
+        ctx.fill()
+        ctx.stroke()
+        ctx.fillStyle = '#fff'
+        ctx.font = '10px "JetBrains Mono"'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(text, x, y)
+      }
+
+      function wireColor(wire) {
+        return wire.bitWidth > 7 ? '#f97316' : '#3b82f6'
+      }
+
+      function drawWires() {
+        wires.forEach((wire) => {
+          drawWire(wire)
+        })
+
+        if (draggingWireStart) {
+          const start = portPosition(
+            draggingWireStart.component,
+            draggingWireStart.port
+          )
+          const end = hoverPort
+            ? portPosition(hoverPort.component, hoverPort.port)
+            : {
+                x: mouseGrid.x * GRID_SIZE + camera.x,
+                y: mouseGrid.y * GRID_SIZE + camera.y,
+              }
+          ctx.strokeStyle = '#888'
+          ctx.lineWidth = 2
+          ctx.beginPath()
+          ctx.moveTo(start.x, start.y)
+          ctx.lineTo(end.x, end.y)
+          ctx.stroke()
+        }
+      }
+
+      function drawWire(wire) {
+        const fromComp = components.find((c) => c.id === wire.fromCompId)
+        const toComp = components.find((c) => c.id === wire.toCompId)
+        if (!fromComp || !toComp) return
+        const fromPort = fromComp.outputs.find((p) => p.id === wire.fromPortId)
+        const toPort = toComp.inputs.find((p) => p.id === wire.toPortId)
+        if (!fromPort || !toPort) return
+        const start = portPosition(fromComp, fromPort)
+        const end = portPosition(toComp, toPort)
+        const active = wire.value !== 0n
+
+        ctx.strokeStyle = active ? '#fffa8b' : wireColor(wire)
+        ctx.lineWidth = active ? 3 : 2
+        ctx.lineCap = 'round'
+        ctx.beginPath()
+        ctx.moveTo(start.x, start.y)
+        ctx.lineTo(end.x, end.y)
+        ctx.stroke()
+
+        if (wire.bitWidth > 1) {
+          const midX = (start.x + end.x) / 2
+          const midY = (start.y + end.y) / 2
+          drawBadge(midX, midY, `${wire.bitWidth}`, wireColor(wire))
+        }
+      }
+
+      function drawPort(comp, port) {
+        const def = TOOLS[comp.type]
+        const pos = portPosition(comp, port)
+        const active = port.value !== 0n
+        ctx.beginPath()
+        ctx.fillStyle = '#0d0d0d'
+        ctx.strokeStyle = def.color
+        ctx.lineWidth = 2
+        ctx.arc(pos.x, pos.y, PORT_RADIUS, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.stroke()
+        if (active) {
+          ctx.fillStyle = '#fffa8b'
+          ctx.beginPath()
+          ctx.arc(pos.x, pos.y, PORT_RADIUS - 3, 0, Math.PI * 2)
+          ctx.fill()
+        }
+        if (hoverPort && hoverPort.component === comp && hoverPort.port === port) {
+          ctx.strokeStyle = '#fff'
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          ctx.arc(pos.x, pos.y, PORT_RADIUS + 2, 0, Math.PI * 2)
+          ctx.stroke()
+        }
+        if (port.bitWidth > 1) {
+          drawBadge(
+            pos.x + (port.type === 'OUT' ? 16 : -16),
+            pos.y,
+            `${port.bitWidth}`,
+            wireColor({ bitWidth: port.bitWidth })
+          )
+        }
+      }
+
+      function drawComponent(comp, isGhost = false) {
+        const def = TOOLS[comp.type]
+        const x = comp.gx * GRID_SIZE + camera.x
+        const y = comp.gy * GRID_SIZE + camera.y
+        const w = comp.w * GRID_SIZE
+        const h = comp.h * GRID_SIZE
+
+        ctx.save()
+        if (isGhost) ctx.globalAlpha = 0.6
+        ctx.fillStyle = '#000'
+        ctx.fillRect(x, y, w, h)
+        ctx.strokeStyle = def.color
+        ctx.lineWidth = 2
+        ctx.strokeRect(x, y, w, h)
+
+        ctx.fillStyle = def.color
+        ctx.font = 'bold 12px "JetBrains Mono"'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+
+        if (comp.type === 'INPUT') {
+          const pad = 8
+          ctx.fillStyle = '#000'
+          ctx.fillRect(x + pad, y + pad, w - pad * 2, h - pad * 2)
+          const onText = comp.state ? 'ON' : 'OFF'
+          ctx.fillStyle = comp.state ? '#4f4' : '#333'
+          ctx.fillRect(
+            x + pad + 2,
+            y + pad + 2,
+            w - pad * 2 - 4,
+            h - pad * 2 - 4
+          )
+          ctx.fillStyle = '#fff'
+          ctx.fillText(
+            `${onText} x${comp.properties.bitWidth}`,
+            x + w / 2,
+            y + h / 2
+          )
+        } else if (comp.type === 'OUTPUT') {
+          ctx.beginPath()
+          ctx.arc(x + w / 2, y + h / 2, 12, 0, Math.PI * 2)
+          ctx.fillStyle = '#000'
+          ctx.fill()
+          ctx.beginPath()
+          ctx.arc(x + w / 2, y + h / 2, 8, 0, Math.PI * 2)
+          if (comp.isLit) {
+            ctx.fillStyle = '#ffff00'
+            ctx.shadowColor = '#ffff00'
+            ctx.shadowBlur = 20
+          } else {
+            ctx.fillStyle = '#333'
+          }
+          ctx.fill()
+          ctx.shadowBlur = 0
+          ctx.fillStyle = def.color
+          ctx.fillText(`OUT x${comp.properties.bitWidth}`, x + w / 2, y + h - 12)
+        } else {
+          ctx.fillText(def.label, x + w / 2, y + h / 2)
+          if (comp.properties.bitWidth) {
+            ctx.fillStyle = '#888'
+            ctx.font = '10px "JetBrains Mono"'
+            ctx.fillText(`x${comp.properties.bitWidth}`, x + w / 2, y + h - 12)
+          }
+          if (comp.type === 'SPLITTER' || comp.type === 'MERGER') {
+            ctx.fillStyle = '#888'
+            ctx.font = '10px "JetBrains Mono"'
+            ctx.fillText(`${comp.properties.busSize}-bit`, x + w / 2, y + 14)
+          }
+        }
+
+        comp.inputs.forEach((p) => drawPort(comp, p))
+        comp.outputs.forEach((p) => drawPort(comp, p))
+
+        ctx.restore()
+      }
+
+      function drawAllComponents() {
+        components.forEach((c) => drawComponent(c))
+        if (placingType) {
+          drawComponent(
+            new Component(mouseGrid.x, mouseGrid.y, placingType),
+            true
+          )
+        }
+      }
+
+      function render() {
+        simulate()
+        ctx.fillStyle = '#0f0f0f'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        drawGrid()
+        drawWires()
+        drawAllComponents()
+        requestAnimationFrame(render)
+      }
+
       function refreshHUD() {
         hud.innerHTML = ''
 
-        const selectBtn = document.createElement('button')
-        selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
-        selectBtn.innerText = '[ ] Select Area'
-        selectBtn.onclick = () => {
-          mode = mode === 'SELECTING' ? 'IDLE' : 'SELECTING'
-          selectedComponents = []
-          selectionStart = null
-          refreshHUD()
-        }
-        hud.appendChild(selectBtn)
-
-        const createBtn = document.createElement('button')
-        createBtn.className = 'action'
-        createBtn.innerText = '+ Save Comp'
-        createBtn.onclick = createCustomComponent
-        hud.appendChild(createBtn)
+        const modalBtn = document.createElement('button')
+        modalBtn.className = 'action'
+        modalBtn.innerText = 'Save / Load'
+        modalBtn.onclick = () => openModal('save')
+        hud.appendChild(modalBtn)
 
         const sep = document.createElement('div')
         sep.className = 'separator'
@@ -693,31 +1077,10 @@
           swatch.style.backgroundColor = def.color
           btn.appendChild(swatch)
           btn.appendChild(document.createTextNode(def.label))
-
-          btn.onpointerdown = (e) => {
-            e.preventDefault()
-            e.stopPropagation()
-            btn.setPointerCapture(e.pointerId)
-            mode = 'DRAGGING_NEW'
-            newCompType = key
-            mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
-          }
-
-          btn.onpointerup = (e) => {
-            btn.releasePointerCapture(e.pointerId)
-            if (mode === 'DRAGGING_NEW') {
-              const g = getGrid({ x: e.clientX, y: e.clientY })
-              if (newCompType === 'WIRE') {
-                if (!checkCollision(g.x, g.y, 'WIRE'))
-                  wires.set(`${g.x},${g.y}`, true)
-              } else {
-                if (!checkCollision(g.x, g.y, newCompType)) {
-                  components.push(new Component(g.x, g.y, newCompType))
-                }
-              }
-            }
-            mode = 'IDLE'
-            newCompType = null
+          if (placingType === key) btn.classList.add('active')
+          btn.onclick = () => {
+            placingType = placingType === key ? null : key
+            refreshHUD()
           }
           hud.appendChild(btn)
         })
@@ -732,113 +1095,257 @@
         clearBtn.onclick = () => {
           if (confirm('Reset Board?')) {
             components = []
-            wires.clear()
-            wireStates.clear()
-            selectedComponents = []
-            camera = { x: 0, y: 0 }
+            wires = []
           }
         }
         hud.appendChild(clearBtn)
       }
 
+      function serializeProject() {
+        return JSON.stringify(
+          {
+            format: 'OpenLogic',
+            version: '1.0',
+            library: [],
+            main: {
+              components: components.map((c) => ({
+                id: c.id,
+                type: c.type,
+                pos: { x: c.gx, y: c.gy },
+                properties: c.properties,
+              })),
+              wires: wires.map((w) => ({
+                from: { comp: w.fromCompId, port: w.fromPortId },
+                to: { comp: w.toCompId, port: w.toPortId },
+                bitWidth: w.bitWidth,
+              })),
+            },
+          },
+          null,
+          2
+        )
+      }
+
+      function updateSaveTextarea() {
+        saveTextarea.value = serializeProject()
+      }
+
+      async function handleLoad() {
+        try {
+          let text = loadTextarea.value.trim()
+          if (loadFileInput.files && loadFileInput.files[0]) {
+            text = await loadFileInput.files[0].text()
+          }
+          if (!text) {
+            alert('Provide JSON via text area or file input.')
+            return
+          }
+          const data = JSON.parse(text)
+          loadProject(data)
+          closeModal()
+        } catch (err) {
+          alert('Failed to load project: ' + err.message)
+        }
+      }
+
+      function loadProject(data) {
+        if (!data || data.format !== 'OpenLogic') {
+          throw new Error('Invalid format')
+        }
+        components = []
+        wires = []
+        const list = data.main?.components || []
+        list.forEach((c) => {
+          const props = { ...(c.properties || {}) }
+          if (props.inputs && !props.busSize) props.busSize = props.inputs
+          if (props.outputs && !props.busSize) props.busSize = props.outputs
+          const comp = new Component(
+            c.pos?.x ?? c.x ?? 0,
+            c.pos?.y ?? c.y ?? 0,
+            c.type,
+            props
+          )
+          comp.id = c.id || comp.id
+          configureComponent(comp)
+          components.push(comp)
+        })
+
+        const wireList = data.main?.wires || []
+        wireList.forEach((w) => {
+          const fromComp = components.find((c) => c.id === w.from?.comp)
+          const toComp = components.find((c) => c.id === w.to?.comp)
+          if (!fromComp || !toComp) return
+          const fromPort = fromComp.outputs.find((p) => p.id === w.from?.port)
+          const toPort = toComp.inputs.find((p) => p.id === w.to?.port)
+          if (!fromPort || !toPort) return
+          const bitWidth = w.bitWidth || fromPort.bitWidth
+          if (fromPort.bitWidth !== toPort.bitWidth) return
+          wires.push(
+            new Wire({
+              id: w.id,
+              fromCompId: fromComp.id,
+              fromPortId: fromPort.id,
+              toCompId: toComp.id,
+              toPortId: toPort.id,
+              bitWidth,
+            })
+          )
+        })
+      }
+
+      function openModal(tab = 'save') {
+        modalBackdrop.classList.remove('hidden')
+        setModalTab(tab)
+        updateSaveTextarea()
+      }
+
+      function closeModal() {
+        modalBackdrop.classList.add('hidden')
+      }
+
+      function setModalTab(tab) {
+        const saveContent = document.querySelector(
+          '.modal-content[data-tab="save"]'
+        )
+        const loadContent = document.querySelector(
+          '.modal-content[data-tab="load"]'
+        )
+        if (tab === 'save') {
+          tabSave.classList.add('active')
+          tabLoad.classList.remove('active')
+          saveContent.classList.remove('hidden')
+          loadContent.classList.add('hidden')
+          updateSaveTextarea()
+        } else {
+          tabLoad.classList.add('active')
+          tabSave.classList.remove('active')
+          saveContent.classList.add('hidden')
+          loadContent.classList.remove('hidden')
+        }
+      }
+
+      function initModalEvents() {
+        modalClose.addEventListener('click', closeModal)
+        tabSave.addEventListener('click', () => setModalTab('save'))
+        tabLoad.addEventListener('click', () => setModalTab('load'))
+        copyBtn.addEventListener('click', async () => {
+          updateSaveTextarea()
+          await navigator.clipboard.writeText(saveTextarea.value)
+        })
+        downloadBtn.addEventListener('click', () => {
+          updateSaveTextarea()
+          const blob = new Blob([saveTextarea.value], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = 'circuit.json'
+          a.click()
+          URL.revokeObjectURL(url)
+        })
+        applyLoadBtn.addEventListener('click', handleLoad)
+      }
+
+      function handleDoubleClick(e) {
+        const g = getGrid({ x: e.clientX, y: e.clientY })
+        const hit = componentAt(g.x, g.y)
+        if (!hit) return
+        if (hit.type === 'SPLITTER' || hit.type === 'MERGER') {
+          const next = prompt('Bus Width (1-64)', hit.properties.busSize ?? 8)
+          if (next !== null) {
+            hit.properties.busSize = clampBits(next, 8)
+            configureComponent(hit)
+          }
+        } else if (hit.properties.bitWidth !== undefined) {
+          const next = prompt('Bit Width (1-64)', hit.properties.bitWidth ?? 1)
+          if (next !== null) {
+            hit.properties.bitWidth = clampBits(next, 1)
+            configureComponent(hit)
+          }
+        }
+      }
+
       canvas.addEventListener('pointerdown', (e) => {
         const g = getGrid({ x: e.clientX, y: e.clientY })
-
-        if (mode === 'SELECTING') {
-          selectionStart = g
-          return
-        }
+        const portHit = hitTestPort(e.clientX, e.clientY)
 
         if (e.button === 2) {
-          const hit = components.find(
-            (c) =>
-              g.x >= c.gx &&
-              g.x < c.gx + TOOLS[c.type].w &&
-              g.y >= c.gy &&
-              g.y < c.gy + TOOLS[c.type].h
-          )
-          if (hit) {
-            components.splice(components.indexOf(hit), 1)
-            const idx = selectedComponents.indexOf(hit)
-            if (idx > -1) selectedComponents.splice(idx, 1)
-          } else {
-            wires.delete(`${g.x},${g.y}`)
-            mode = 'ERASING'
+          if (portHit) {
+            wires = wires.filter(
+              (w) =>
+                !(
+                  (w.fromCompId === portHit.component.id &&
+                    w.fromPortId === portHit.port.id) ||
+                  (w.toCompId === portHit.component.id &&
+                    w.toPortId === portHit.port.id)
+                )
+            )
+            return
           }
+          const hitComp = componentAt(g.x, g.y)
+          if (hitComp) removeComponent(hitComp)
           return
         }
 
-        const hit = components.find(
-          (c) =>
-            g.x >= c.gx &&
-            g.x < c.gx + TOOLS[c.type].w &&
-            g.y >= c.gy &&
-            g.y < c.gy + TOOLS[c.type].h
-        )
+        if (portHit) {
+          draggingWireStart = portHit
+          mode = 'CONNECTING'
+          return
+        }
 
-        if (hit) {
-          if (hit.type === 'INPUT') {
-            const screenX = hit.gx * GRID_SIZE + camera.x
-            const screenY = hit.gy * GRID_SIZE + camera.y
-            const cx = e.clientX - screenX
-            const cy = e.clientY - screenY
+        const compHit = componentAt(g.x, g.y)
+        if (compHit) {
+          if (compHit.type === 'INPUT') {
+            const posX = compHit.gx * GRID_SIZE + camera.x
+            const posY = compHit.gy * GRID_SIZE + camera.y
+            const relX = e.clientX - posX
+            const relY = e.clientY - posY
             const pad = 8
-            const w = TOOLS[hit.type].w * GRID_SIZE
-            const h = TOOLS[hit.type].h * GRID_SIZE
-            if (cx > pad && cx < w - pad && cy > pad && cy < h - pad) {
-              hit.state = !hit.state
+            const w = compHit.w * GRID_SIZE
+            const h = compHit.h * GRID_SIZE
+            if (relX > pad && relX < w - pad && relY > pad && relY < h - pad) {
+              compHit.state = !compHit.state
               return
             }
           }
           mode = 'DRAGGING_EXISTING'
-          draggingComp = hit
-          initialPos = { gx: hit.gx, gy: hit.gy }
-          dragOffset = { x: g.x - hit.gx, y: g.y - hit.gy }
-        } else if (wires.has(`${g.x},${g.y}`)) {
-          mode = 'DRAGGING_WIRE'
-          draggingWire = `${g.x},${g.y}`
-          wires.delete(draggingWire)
-        } else {
-          mode = 'PANNING'
-          dragStart = { x: e.clientX - camera.x, y: e.clientY - camera.y }
+          draggingComp = compHit
+          dragOffset = { x: g.x - compHit.gx, y: g.y - compHit.gy }
+          draggingComp.initialPos = { gx: compHit.gx, gy: compHit.gy }
+          return
         }
+
+        if (placingType) {
+          if (!checkCollision(g.x, g.y, placingType)) {
+            components.push(new Component(g.x, g.y, placingType))
+          }
+          return
+        }
+
+        mode = 'PANNING'
+        dragStart = { x: e.clientX - camera.x, y: e.clientY - camera.y }
       })
 
       window.addEventListener('pointermove', (e) => {
-        const g = getGrid({ x: e.clientX, y: e.clientY })
-        mouseGrid = g
+        mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
+        hoverPort = hitTestPort(e.clientX, e.clientY)
         if (mode === 'PANNING') {
           camera.x = e.clientX - dragStart.x
           camera.y = e.clientY - dragStart.y
         } else if (mode === 'DRAGGING_EXISTING' && draggingComp) {
-          draggingComp.gx = g.x - dragOffset.x
-          draggingComp.gy = g.y - dragOffset.y
-        } else if (mode === 'ERASING') {
-          wires.delete(`${g.x},${g.y}`)
-        } else if (mode === 'SELECTING' && selectionStart) {
-          selectionEnd = g
+          draggingComp.gx = mouseGrid.x - dragOffset.x
+          draggingComp.gy = mouseGrid.y - dragOffset.y
         }
       })
 
-      window.addEventListener('pointerup', (e) => {
-        if (mode === 'SELECTING' && selectionStart) {
-          selectionEnd = getGrid({ x: e.clientX, y: e.clientY })
-          const sx = Math.min(selectionStart.x, selectionEnd.x)
-          const ex = Math.max(selectionStart.x, selectionEnd.x)
-          const sy = Math.min(selectionStart.y, selectionEnd.y)
-          const ey = Math.max(selectionStart.y, selectionEnd.y)
+      window.addEventListener('pointerup', () => {
+        if (mode === 'CONNECTING' && draggingWireStart) {
+          const endPort = hoverPort
+          if (endPort && endPort !== draggingWireStart) {
+            tryConnectPorts(draggingWireStart, endPort)
+          }
+        }
 
-          selectedComponents = components.filter((c) => {
-            const def = TOOLS[c.type]
-            return (
-              c.gx >= sx &&
-              c.gx + def.w <= ex + 1 &&
-              c.gy >= sy &&
-              c.gy + def.h <= ey + 1
-            )
-          })
-          mode = 'IDLE'
-        } else if (mode === 'DRAGGING_EXISTING' && draggingComp) {
+        if (mode === 'DRAGGING_EXISTING' && draggingComp) {
           if (
             checkCollision(
               draggingComp.gx,
@@ -847,36 +1354,32 @@
               draggingComp.id
             )
           ) {
-            draggingComp.gx = initialPos.gx
-            draggingComp.gy = initialPos.gy
-          }
-        } else if (mode === 'DRAGGING_WIRE') {
-          if (!checkCollision(mouseGrid.x, mouseGrid.y, 'WIRE')) {
-            wires.set(`${mouseGrid.x},${mouseGrid.y}`, true)
-          } else {
-            wires.set(draggingWire, true)
+            draggingComp.gx = draggingComp.initialPos.gx
+            draggingComp.gy = draggingComp.initialPos.gy
           }
         }
 
-        if (mode !== 'DRAGGING_NEW' && mode !== 'SELECTING') mode = 'IDLE'
+        mode = 'IDLE'
         draggingComp = null
-        draggingWire = null
-        selectionStart = null
+        draggingWireStart = null
       })
 
+      canvas.addEventListener('dblclick', handleDoubleClick)
       window.addEventListener('contextmenu', (e) => e.preventDefault())
       window.addEventListener('resize', () => {
         canvas.width = window.innerWidth
         canvas.height = window.innerHeight
       })
-      canvas.width = window.innerWidth
-      canvas.height = window.innerHeight
-      refreshHUD()
-      function loop() {
+
+      function init() {
+        canvas.width = window.innerWidth
+        canvas.height = window.innerHeight
+        refreshHUD()
+        initModalEvents()
         render()
-        requestAnimationFrame(loop)
       }
-      loop()
+
+      init()
     </script>
   </body>
 </html>
