@@ -52,5 +52,3 @@ The engine uses a **masked BigInt architecture** to handle up to 64-bit logic ac
 The simulation runs on a localized propagation loop, ensuring that state changes ripple through the circuit for up to 8 iterations per frame to resolve feedback loops and complex logic gates.
 
 ---
-
-**Would you like me to create a specific "Quick Start" guide or a set of example JSON circuits (like a Half-Adder) that you can include in the repository?**
