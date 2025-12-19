@@ -1,0 +1,29 @@
+{
+  "format": "OpenCircuit",
+  "version": "1.0",
+  "library": [],
+  "main": {
+    "components": [
+      { "id": "d", "type": "INPUT", "pos": { "x": 1, "y": 2 }, "properties": { "bitWidth": 1 } },
+      { "id": "en", "type": "INPUT", "pos": { "x": 1, "y": 5 }, "properties": { "bitWidth": 1 } },
+      { "id": "notd", "type": "NOT", "pos": { "x": 3, "y": 2 }, "properties": { "bitWidth": 1 } },
+      { "id": "sand", "type": "AND", "pos": { "x": 5, "y": 3 }, "properties": { "bitWidth": 1 } },
+      { "id": "rand", "type": "AND", "pos": { "x": 5, "y": 5 }, "properties": { "bitWidth": 1 } },
+      { "id": "n1", "type": "NOR", "pos": { "x": 8, "y": 3 }, "properties": { "bitWidth": 1 } },
+      { "id": "n2", "type": "NOR", "pos": { "x": 8, "y": 6 }, "properties": { "bitWidth": 1 } },
+      { "id": "q", "type": "OUTPUT", "pos": { "x": 11, "y": 3 }, "properties": { "bitWidth": 1 } }
+    ],
+    "wires": [
+      { "from": { "comp": "d", "port": "out" }, "to": { "comp": "notd", "port": "in" }, "bitWidth": 1 },
+      { "from": { "comp": "en", "port": "out" }, "to": { "comp": "sand", "port": "in0" }, "bitWidth": 1 },
+      { "from": { "comp": "d", "port": "out" }, "to": { "comp": "sand", "port": "in1" }, "bitWidth": 1 },
+      { "from": { "comp": "en", "port": "out" }, "to": { "comp": "rand", "port": "in0" }, "bitWidth": 1 },
+      { "from": { "comp": "notd", "port": "out" }, "to": { "comp": "rand", "port": "in1" }, "bitWidth": 1 },
+      { "from": { "comp": "sand", "port": "out" }, "to": { "comp": "n1", "port": "in0" }, "bitWidth": 1 },
+      { "from": { "comp": "rand", "port": "out" }, "to": { "comp": "n2", "port": "in0" }, "bitWidth": 1 },
+      { "from": { "comp": "n2", "port": "out" }, "to": { "comp": "n1", "port": "in1" }, "bitWidth": 1 },
+      { "from": { "comp": "n1", "port": "out" }, "to": { "comp": "n2", "port": "in1" }, "bitWidth": 1 },
+      { "from": { "comp": "n1", "port": "out" }, "to": { "comp": "q", "port": "in" }, "bitWidth": 1 }
+    ]
+  }
+}

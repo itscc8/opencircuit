@@ -95,6 +95,10 @@
       button:active {
         background: #333;
       }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
       button.danger {
         border-color: #522;
         color: #e55;
@@ -324,6 +328,10 @@
       let selectionStart = null
       let selectionEnd = null
       let selectedComponents = []
+      let isPaused = false
+      let ticksPerSecond = 30
+      let tickTimer = null
+      const probes = new Map()
       const customLibrary = {}
 
       function clampBits(value, fallback = 1) {
@@ -355,6 +363,7 @@
           this.relativeY = relativeY
           this.bitWidth = clampBits(bitWidth)
           this.value = 0n
+          this.nextValue = 0n
         }
       }
 
@@ -367,6 +376,7 @@
           this.toPortId = toPortId
           this.bitWidth = clampBits(bitWidth)
           this.value = 0n
+          this.frameToggles = 0
         }
       }
 
@@ -379,6 +389,8 @@
           this.state = false
           this.isLit = false
           this.overrideValue = null
+          this.currentValue = 0n
+          this.nextValue = 0n
           this.properties = {
             ...(TOOLS[type]?.defaultProperties || {}),
             ...properties,
@@ -769,54 +781,69 @@
       }
 
       function removeComponent(comp) {
-        wires = wires.filter(
-          (w) => w.fromCompId !== comp.id && w.toCompId !== comp.id
-        )
+        wires = wires.filter((w) => {
+          const keep = w.fromCompId !== comp.id && w.toCompId !== comp.id
+          if (!keep) probes.delete(w.id)
+          return keep
+        })
         const idx = components.indexOf(comp)
         if (idx >= 0) components.splice(idx, 1)
       }
 
-      function simulate() {
-        components.forEach((c) => {
+      function runTickFor(comps, wireList) {
+        const context = { components: comps, wires: wireList }
+        comps.forEach((c) => {
           c.isLit = false
-          c.overrideValue = null
         })
 
-        for (let step = 0; step < 8; step++) {
-          let changed = false
-
-          wires.forEach((w) => {
-            const fromComp = components.find((c) => c.id === w.fromCompId)
-            const fromPort = fromComp?.outputs.find(
-              (p) => p.id === w.fromPortId
+        comps.forEach((comp) => {
+          const inputs = comp.inputs.map((port) => {
+            const wire = wireList.find(
+              (w) => w.toCompId === comp.id && w.toPortId === port.id
             )
-            w.value = fromPort ? fromPort.value : 0n
+            const val = maskValue(wire ? wire.value : port.value ?? 0n, port.bitWidth)
+            port.value = val
+            return val
           })
-
-          components.forEach((comp) => {
-            const inputs = comp.inputs.map((port) => {
-              const wire = wires.find(
-                (w) => w.toCompId === comp.id && w.toPortId === port.id
-              )
-              return maskValue(wire ? wire.value : 0n, port.bitWidth)
-            })
-            const outputs = evaluateComponent(comp, inputs)
-            outputs.forEach((val, idx) => {
-              const port = comp.outputs[idx]
-              if (!port) return
-              const masked = maskValue(val, port.bitWidth)
-              if (port.value !== masked) {
-                port.value = masked
-                changed = true
-              }
-            })
+          const outputs = evaluateComponent(comp, inputs, context)
+          comp.outputs.forEach((port, idx) => {
+            port.nextValue = maskValue(outputs[idx] ?? 0n, port.bitWidth)
           })
+        })
 
-          if (!changed) break
-        }
+        comps.forEach((comp) => {
+          comp.outputs.forEach((port) => {
+            comp.currentValue = port.value
+            comp.nextValue = port.nextValue ?? 0n
+            port.value = port.nextValue ?? 0n
+          })
+        })
+
+        wireList.forEach((wire) => {
+          const fromComp = comps.find((c) => c.id === wire.fromCompId)
+          const fromPort = fromComp?.outputs.find((p) => p.id === wire.fromPortId)
+          const newVal = fromPort ? maskValue(fromPort.value, wire.bitWidth) : 0n
+          if (wire.value !== newVal) {
+            wire.frameToggles = (wire.frameToggles || 0) + 1
+          }
+          wire.value = newVal
+          if (probes.has(wire.id)) {
+            const probe = probes.get(wire.id)
+            probe.history.push(newVal)
+            if (probe.history.length > 50) probe.history.shift()
+          }
+        })
       }
 
-      function evaluateComponent(comp, inputs) {
+      function tickOnce() {
+        runTickFor(components, wires)
+      }
+
+      function tick(count = 1) {
+        for (let i = 0; i < count; i++) tickOnce()
+      }
+
+      function evaluateComponent(comp, inputs, context) {
         switch (comp.type) {
           case 'INPUT': {
             const bits = comp.outputs[0]?.bitWidth || 1
@@ -894,7 +921,7 @@
           }
           default: {
             if (customLibrary[comp.type]) {
-              return evaluateCustomComponent(comp, inputs)
+              return evaluateCustomComponent(comp, inputs, context)
             }
             return []
           }
@@ -912,49 +939,12 @@
         const wList = def.wires.map((w) => ({
           ...w,
           value: 0n,
+          frameToggles: 0,
         }))
         return { components: comps, wires: wList }
       }
 
-      function simulateLocal(comps, wireList) {
-        comps.forEach((c) => {
-          c.outputs.forEach((p) => (p.value = 0n))
-          c.isLit = false
-        })
-
-        for (let step = 0; step < 8; step++) {
-          let changed = false
-
-          wireList.forEach((w) => {
-            const fromComp = comps.find((c) => c.id === w.fromCompId)
-            const fromPort = fromComp?.outputs.find((p) => p.id === w.fromPortId)
-            w.value = fromPort ? fromPort.value : 0n
-          })
-
-          comps.forEach((comp) => {
-            const inputs = comp.inputs.map((port) => {
-              const wire = wireList.find(
-                (w) => w.toCompId === comp.id && w.toPortId === port.id
-              )
-              return maskValue(wire ? wire.value : 0n, port.bitWidth)
-            })
-            const outputs = evaluateComponent(comp, inputs)
-            outputs.forEach((val, idx) => {
-              const port = comp.outputs[idx]
-              if (!port) return
-              const masked = maskValue(val, port.bitWidth)
-              if (port.value !== masked) {
-                port.value = masked
-                changed = true
-              }
-            })
-          })
-
-          if (!changed) break
-        }
-      }
-
-      function evaluateCustomComponent(comp, inputs) {
+      function evaluateCustomComponent(comp, inputs, parentContext) {
         const def = customLibrary[comp.type]
         if (!def) return []
         if (!comp.subInstance) {
@@ -966,16 +956,61 @@
           const target = sub.components.find((c) => c.id === p.componentId)
           if (target) target.overrideValue = inputs[idx] ?? 0n
         })
-        simulateLocal(sub.components, sub.wires)
+        runTickFor(sub.components, sub.wires)
         const outputs = def.outputs.map((p) => {
           const outComp = sub.components.find((c) => c.id === p.componentId)
           if (!outComp) return 0n
           const wire = sub.wires.find(
             (w) => w.toCompId === outComp.id && w.toPortId === 'in'
           )
-          return wire ? wire.value : 0n
+          // fallback to the input buffer only when no wire connects (keeps legacy single-port OUTPUT defs working)
+          const val = wire ? wire.value : outComp.inputs.find((i) => i.id === 'in')?.value
+          return maskValue(val ?? 0n, p.bitWidth || outComp.inputs[0]?.bitWidth || 1)
         })
         return outputs
+      }
+
+      function stopTickLoop() {
+        if (tickTimer) {
+          clearInterval(tickTimer)
+          tickTimer = null
+        }
+      }
+
+      function setTickRate(hz) {
+        const clamped = Math.max(1, Math.min(240, Math.floor(hz || 1)))
+        ticksPerSecond = clamped
+        startTickLoop()
+        refreshHUD()
+      }
+
+      function startTickLoop() {
+        stopTickLoop()
+        tickTimer = setInterval(() => {
+          if (!isPaused) tickOnce()
+        }, 1000 / ticksPerSecond)
+      }
+
+      function pauseSimulation() {
+        isPaused = true
+        refreshHUD()
+      }
+
+      function resumeSimulation() {
+        isPaused = false
+        refreshHUD()
+      }
+
+      function togglePause() {
+        isPaused = !isPaused
+        refreshHUD()
+      }
+
+      function stepSimulation(count = 1) {
+        const prev = isPaused
+        isPaused = true
+        tick(count)
+        isPaused = prev
       }
 
       function getGrid(clientPos) {
@@ -1069,6 +1104,7 @@
           ctx.lineTo(end.x, end.y)
           ctx.stroke()
         }
+        drawProbes()
       }
 
       function drawWire(wire) {
@@ -1081,9 +1117,10 @@
         const start = portPosition(fromComp, fromPort)
         const end = portPosition(toComp, toPort)
         const active = wire.value !== 0n
+        const toggled = (wire.frameToggles || 0) > 1
 
-        ctx.strokeStyle = active ? '#fffa8b' : wireColor(wire)
-        ctx.lineWidth = active ? 3 : 2
+        ctx.strokeStyle = toggled ? '#a855f7' : active ? '#fffa8b' : wireColor(wire)
+        ctx.lineWidth = toggled || active ? 3 : 2
         ctx.lineCap = 'round'
         ctx.beginPath()
         ctx.moveTo(start.x, start.y)
@@ -1095,6 +1132,60 @@
           const midY = (start.y + end.y) / 2
           drawBadge(midX, midY, `${wire.bitWidth}`, wireColor(wire))
         }
+        wire.frameToggles = 0
+      }
+
+      function toggleProbe(wire) {
+        if (!wire) return
+        if (probes.has(wire.id)) {
+          probes.delete(wire.id)
+        } else {
+          probes.set(wire.id, { history: [wire.value] })
+        }
+      }
+
+      function drawProbes() {
+        probes.forEach((probe, id) => {
+          const wire = wires.find((w) => w.id === id)
+          if (!wire) return
+          const fromComp = components.find((c) => c.id === wire.fromCompId)
+          const toComp = components.find((c) => c.id === wire.toCompId)
+          if (!fromComp || !toComp) return
+          const fromPort = fromComp.outputs.find((p) => p.id === wire.fromPortId)
+          const toPort = toComp.inputs.find((p) => p.id === wire.toPortId)
+          if (!fromPort || !toPort) return
+          const start = portPosition(fromComp, fromPort)
+          const end = portPosition(toComp, toPort)
+          const midX = (start.x + end.x) / 2
+          const midY = (start.y + end.y) / 2
+          const lastVal = probe.history[probe.history.length - 1] ?? wire.value
+          const boxW = 90
+          const boxH = 34
+          ctx.save()
+          ctx.fillStyle = 'rgba(15,23,42,0.9)'
+          ctx.strokeStyle = '#94a3b8'
+          ctx.lineWidth = 1
+          ctx.fillRect(midX - boxW / 2, midY - boxH / 2, boxW, boxH)
+          ctx.strokeRect(midX - boxW / 2, midY - boxH / 2, boxW, boxH)
+          ctx.fillStyle = '#e5e7eb'
+          ctx.font = '10px "JetBrains Mono"'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(`0x${lastVal.toString(16)}`, midX, midY - 6)
+          const hist = probe.history.slice(-20)
+          if (hist.length) {
+            ctx.strokeStyle = '#38bdf8'
+            ctx.beginPath()
+            hist.forEach((v, idx) => {
+              const x = midX - boxW / 2 + 6 + (idx / Math.max(1, hist.length - 1)) * (boxW - 12)
+              const y = midY + boxH / 2 - 8 - (Number(v !== 0n) * 10)
+              if (idx === 0) ctx.moveTo(x, y)
+              else ctx.lineTo(x, y)
+            })
+            ctx.stroke()
+          }
+          ctx.restore()
+        })
       }
 
       function drawPort(comp, port) {
@@ -1236,7 +1327,6 @@
       }
 
       function render() {
-        simulate()
         ctx.fillStyle = '#0f0f0f'
         ctx.fillRect(0, 0, canvas.width, canvas.height)
         drawGrid()
@@ -1266,6 +1356,37 @@
         modalBtn.innerText = 'Save / Load'
         modalBtn.onclick = () => openModal('save')
         hud.appendChild(modalBtn)
+
+        const pauseBtn = document.createElement('button')
+        pauseBtn.className = 'action'
+        pauseBtn.innerText = isPaused ? 'Resume' : 'Pause'
+        pauseBtn.onclick = togglePause
+        hud.appendChild(pauseBtn)
+
+        const stepBtn = document.createElement('button')
+        stepBtn.className = isPaused ? 'action' : 'action disabled'
+        stepBtn.innerText = 'Step (1 Tick)'
+        stepBtn.disabled = !isPaused
+        stepBtn.onclick = () => stepSimulation(1)
+        hud.appendChild(stepBtn)
+
+        const speedWrap = document.createElement('div')
+        speedWrap.style.display = 'flex'
+        speedWrap.style.flexDirection = 'column'
+        speedWrap.style.gap = '4px'
+        const speedLabel = document.createElement('span')
+        speedLabel.style.fontSize = '11px'
+        speedLabel.style.color = '#aaa'
+        speedLabel.innerText = `Speed: ${ticksPerSecond} Hz`
+        const speedInput = document.createElement('input')
+        speedInput.type = 'range'
+        speedInput.min = '1'
+        speedInput.max = '240'
+        speedInput.value = `${ticksPerSecond}`
+        speedInput.oninput = (e) => setTickRate(Number(e.target.value))
+        speedWrap.appendChild(speedLabel)
+        speedWrap.appendChild(speedInput)
+        hud.appendChild(speedWrap)
 
         const selectBtn = document.createElement('button')
         selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
@@ -1337,9 +1458,8 @@
         clearBtn.innerText = 'Clear All'
           clearBtn.onclick = () => {
             if (confirm('Reset Board?')) {
-              components = []
-              wires = []
-              selectedComponents = []
+              clearAllState()
+              refreshHUD()
             }
           }
           hud.appendChild(clearBtn)
@@ -1408,6 +1528,7 @@
         })
         components = []
         wires = []
+        probes.clear()
         const lib = data.library || []
         lib.forEach((d) => {
           if (!d.name) return
@@ -1456,12 +1577,24 @@
             })
           )
         })
+        tickOnce()
       }
 
       function openModal(tab = 'save') {
         modalBackdrop.classList.remove('hidden')
         setModalTab(tab)
         updateSaveTextarea()
+      }
+
+      function clearAllState() {
+        Object.keys(customLibrary).forEach((k) => {
+          delete customLibrary[k]
+          if (TOOLS[k]) delete TOOLS[k]
+        })
+        components = []
+        wires = []
+        probes.clear()
+        selectedComponents = []
       }
 
       function saveCustomComponent() {
@@ -1648,6 +1781,7 @@
       canvas.addEventListener('pointerdown', (e) => {
         const g = getGrid({ x: e.clientX, y: e.clientY })
         const portHit = hitTestPort(e.clientX, e.clientY)
+        const wireHit = hitTestWire(e.clientX, e.clientY)
         hideContextMenu()
 
         if (mode === 'SELECTING') {
@@ -1657,6 +1791,11 @@
         }
 
         if (draggingFromMenu) return
+
+        if (!portHit && wireHit) {
+          toggleProbe(wireHit)
+          return
+        }
 
         if (portHit) {
           if (e.button === 2) {
@@ -1777,6 +1916,7 @@
           items.push({
             label: 'Delete wire',
             action: () => {
+              probes.delete(wireHit.id)
               wires = wires.filter((w) => w !== wireHit)
             },
           })
@@ -1828,11 +1968,63 @@
         canvas.height = window.innerHeight
       })
 
+      function apiLoad(json) {
+        const data = typeof json === 'string' ? JSON.parse(json) : json
+        loadProject(data)
+        return true
+      }
+
+      window.CircuitAPI = {
+        load: apiLoad,
+        tick: (count = 1) => stepSimulation(count),
+        readComponent: (id) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return null
+          return {
+            id: comp.id,
+            type: comp.type,
+            state: comp.state,
+            isLit: comp.isLit,
+            properties: { ...comp.properties },
+            inputs: comp.inputs.map((p) => ({ id: p.id, value: p.value })),
+            outputs: comp.outputs.map((p) => ({ id: p.id, value: p.value })),
+          }
+        },
+        getWires: () =>
+          wires.map((w) => ({
+            id: w.id,
+            from: { comp: w.fromCompId, port: w.fromPortId },
+            to: { comp: w.toCompId, port: w.toPortId },
+            bitWidth: w.bitWidth,
+            value: w.value,
+          })),
+        setSpeed: (hz) => setTickRate(hz),
+        pause: () => pauseSimulation(),
+        resume: () => resumeSimulation(),
+        registerCustomTool: (def) => registerCustomTool(def),
+        setInput: (id, value) => {
+          const comp = components.find((c) => c.id === id && c.type === 'INPUT')
+          if (!comp) return false
+          comp.state = Boolean(value)
+          if (value === null || value === undefined) {
+            comp.overrideValue = null
+          } else {
+            comp.overrideValue = BigInt(value)
+          }
+          return true
+        },
+        reset: () => {
+          clearAllState()
+        },
+      }
+
       function init() {
         canvas.width = window.innerWidth
         canvas.height = window.innerHeight
         refreshHUD()
         initModalEvents()
+        tickOnce()
+        startTickLoop()
         render()
       }
 

@@ -6,7 +6,8 @@ OpenCircuit is a lightweight, high-performance **digital logic simulator** built
 
 * **Multi-Bit Bus Support:** Process signals from 1 to 64 bits wide. Includes dedicated **Splitter** and **Merger** components to manage data buses.
 * **Custom Chip Creation:** Group individual components into a selection and save them as a reusable **Custom Tool**. This allows for hierarchical design (e.g., building an 8-bit adder from 1-bit full adders).
-* **Real-time Simulation:** An iterative propagation engine simulates logic flow with visual feedback on wire states.
+* **Tick-Based Simulation:** A discrete-time engine with per-tick propagation delay keeps feedback loops (like ring oscillators) stable and observable.
+* **Time Controls & Debugging:** Pause/resume, single-step ticking, speed control, oscillation highlighting, and pin-able probes on wires for live inspection.
 * **Canvas-based UI:** A smooth, panning/zoomable workspace with a responsive HUD and context-sensitive menus.
 * **Project Portability:** Save and load entire designs via JSON strings or `.json` file uploads.
 
@@ -49,6 +50,19 @@ Open the **Save / Load** menu to generate a JSON representation of your work. Yo
 
 The engine uses a **masked BigInt architecture** to handle up to 64-bit logic accurately.
 
-The simulation runs on a localized propagation loop, ensuring that state changes ripple through the circuit for up to 8 iterations per frame to resolve feedback loops and complex logic gates.
+The simulation runs on a discrete tick loop decoupled from rendering. Each tick performs a two-phase read/commit pass (double-buffered ports and wires) to create a 1-tick propagation delay, making oscillators and latches behave deterministically even with feedback.
+
+### Automation (Playwright / MCP)
+
+`window.CircuitAPI` exposes helpers for automated tests:
+
+* `load(json)`: load a serialized circuit (object or JSON string).
+* `tick(count)`: advance the simulation by `count` ticks (honors the discrete tick engine even while paused).
+* `readComponent(id)`: read a component’s current state and port values.
+* `getWires()`: dump all wire values and endpoints.
+* `setSpeed(hz)`: adjust tick rate.
+* `pause()` / `resume()`: control the tick loop without touching state.
+* `setInput(id, value)`: programmatically drive an INPUT component (multi-bit supported via BigInt-friendly values).
+* `reset()`: clear the board.
 
 ---

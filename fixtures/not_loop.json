@@ -1,0 +1,33 @@
+{
+  "format": "OpenCircuit",
+  "version": "1.0",
+  "library": [],
+  "main": {
+    "components": [
+      {
+        "id": "not1",
+        "type": "NOT",
+        "pos": { "x": 2, "y": 2 },
+        "properties": { "bitWidth": 1 }
+      },
+      {
+        "id": "out1",
+        "type": "OUTPUT",
+        "pos": { "x": 5, "y": 2 },
+        "properties": { "bitWidth": 1 }
+      }
+    ],
+    "wires": [
+      {
+        "from": { "comp": "not1", "port": "out" },
+        "to": { "comp": "not1", "port": "in" },
+        "bitWidth": 1
+      },
+      {
+        "from": { "comp": "not1", "port": "out" },
+        "to": { "comp": "out1", "port": "in" },
+        "bitWidth": 1
+      }
+    ]
+  }
+}
