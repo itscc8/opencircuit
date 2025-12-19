@@ -778,7 +778,6 @@
 
       function simulate() {
         components.forEach((c) => {
-          c.outputs.forEach((p) => (p.value = 0n))
           c.isLit = false
           c.overrideValue = null
         })
