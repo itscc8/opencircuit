@@ -1,0 +1,11 @@
+{
+  "name": "opencircuit",
+  "version": "1.0.0",
+  "description": "OpenCircuit discrete-time logic simulator",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

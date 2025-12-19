@@ -1,0 +1,21 @@
+{
+  "format": "OpenCircuit",
+  "version": "1.0",
+  "library": [],
+  "main": {
+    "components": [
+      { "id": "set", "type": "INPUT", "pos": { "x": 1, "y": 1 }, "properties": { "bitWidth": 1 } },
+      { "id": "reset", "type": "INPUT", "pos": { "x": 1, "y": 4 }, "properties": { "bitWidth": 1 } },
+      { "id": "n1", "type": "NOR", "pos": { "x": 4, "y": 1 }, "properties": { "bitWidth": 1 } },
+      { "id": "n2", "type": "NOR", "pos": { "x": 4, "y": 4 }, "properties": { "bitWidth": 1 } },
+      { "id": "q", "type": "OUTPUT", "pos": { "x": 7, "y": 1 }, "properties": { "bitWidth": 1 } }
+    ],
+    "wires": [
+      { "from": { "comp": "set", "port": "out" }, "to": { "comp": "n1", "port": "in0" }, "bitWidth": 1 },
+      { "from": { "comp": "reset", "port": "out" }, "to": { "comp": "n2", "port": "in0" }, "bitWidth": 1 },
+      { "from": { "comp": "n2", "port": "out" }, "to": { "comp": "n1", "port": "in1" }, "bitWidth": 1 },
+      { "from": { "comp": "n1", "port": "out" }, "to": { "comp": "n2", "port": "in1" }, "bitWidth": 1 },
+      { "from": { "comp": "n2", "port": "out" }, "to": { "comp": "q", "port": "in" }, "bitWidth": 1 }
+    ]
+  }
+}
