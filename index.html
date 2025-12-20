@@ -372,6 +372,8 @@
       const MAX_DRC_DISPLAY_COUNT = 5
       const BYTE_MASK = 0xff
       const BYTE_MASK_BIG = 0xffn
+      const SAFE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+      const ASM_ERROR_PREVIEW_CHARS = 120
 
       let components = []
       let wires = []
@@ -442,6 +444,14 @@
       const scheduledComponents = new Map()
       const MAX_EVENTS_PER_TICK = 5000
       let drcFindings = []
+      const breakpoints = []
+      let lastBreakpointHit = null
+      const bundles = new Map()
+      const assemblerState = {
+        isaText: 'NOP => 0x00\nLOAD (?<imm>0x[0-9a-fA-F]+|\\d+) => ${imm}',
+        sourceText: 'NOP\nLOAD 0xAA',
+        lastBytes: [],
+      }
 
       function clampBits(value, fallback = 1) {
         const n = Number(value)
@@ -621,6 +631,16 @@
               location: w.id,
             })
           }
+          if (w.bundle && bundles.has(w.bundle)) {
+            const b = bundles.get(w.bundle)
+            if (w.bitWidth !== b.width) {
+              warnings.push({
+                type: 'bundle_width',
+                message: `Bundle ${b.name} expects ${b.width}-bit (wire ${w.id})`,
+                location: w.id,
+              })
+            }
+          }
         })
 
         driverMap.forEach((drivers, key) => {
@@ -693,6 +713,7 @@
           netName = null,
           path = null,
           pathIsGrid = false,
+          bundle = null,
         }) {
           this.id = id || makeId('wire')
           this.fromCompId = fromCompId
@@ -706,6 +727,7 @@
           this.netName = netName || null
           this.path = path || null
           this.pathIsGrid = !!pathIsGrid
+          this.bundle = bundle || null
         }
       }
 
@@ -960,6 +982,52 @@
               }),
             ]
             c.inputs = []
+          },
+        },
+        FSM: {
+          label: 'FSM',
+          color: '#38bdf8',
+          w: 3,
+          h: 2.5,
+          defaultProperties: { inputWidth: 1, fsm: null },
+          setup: (c) => {
+            const def = normalizeFsmDefinition(c.properties.fsm)
+            c.properties.fsm = def
+            const bits = clampBits(
+              Math.max(1, Math.ceil(Math.log2(Math.max(1, def.states.length))) || 1)
+            )
+            c.properties.stateBits = bits
+            const inBits = clampBits(c.properties.inputWidth || 1)
+            c.inputs = [
+              new Port({
+                id: 'in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2 - 0.5,
+                bitWidth: inBits,
+              }),
+              new Port({
+                id: 'clk',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2 + 0.5,
+                bitWidth: 1,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'state',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+            c.fsmState = def.initial || def.states[0]?.id || 'S0'
+            c.lastClock = c.lastClock ?? 0n
           },
         },
         ROM: {
@@ -1253,12 +1321,25 @@
         const inIds = new Set(comp.inputs.map((p) => p.id))
         const outIds = new Set(comp.outputs.map((p) => p.id))
         wires = wires.filter((w) => {
-          if (w.toCompId === comp.id && !inIds.has(w.toPortId)) return false
-          if (w.fromCompId === comp.id && !outIds.has(w.fromPortId)) return false
+          if (w.toCompId === comp.id && !inIds.has(w.toPortId)) {
+            if (w.bundle) removeWireFromBundle(w.id)
+            return false
+          }
+          if (w.fromCompId === comp.id && !outIds.has(w.fromPortId)) {
+            if (w.bundle) removeWireFromBundle(w.id)
+            return false
+          }
           const fromPort = getPort(w.fromCompId, w.fromPortId)
           const toPort = getPort(w.toCompId, w.toPortId)
-          if (!fromPort || !toPort) return false
-          return fromPort.bitWidth === toPort.bitWidth
+          if (!fromPort || !toPort) {
+            if (w.bundle) removeWireFromBundle(w.id)
+            return false
+          }
+          if (fromPort.bitWidth !== toPort.bitWidth) {
+            if (w.bundle) removeWireFromBundle(w.id)
+            return false
+          }
+          return true
         })
       }
 
@@ -1299,6 +1380,7 @@
           const keep = w.fromCompId !== comp.id && w.toCompId !== comp.id
           if (!keep) {
             probes.delete(w.id)
+            if (w.bundle) removeWireFromBundle(w.id)
             const dest = components.find((c) => c.id === w.toCompId)
             if (dest) queueComponent(dest, gateDelay(dest.type))
           }
@@ -1359,10 +1441,15 @@
         const target = simTime + 1
         processEventsUntil(target)
         sampleProbes()
+        checkBreakpoints()
       }
 
       function tick(count = 1) {
-        for (let i = 0; i < count; i++) tickOnce()
+        lastBreakpointHit = null
+        for (let i = 0; i < count; i++) {
+          tickOnce()
+          if (lastBreakpointHit) break
+        }
       }
 
       function evaluateComponent(comp, inputs, context) {
@@ -1481,6 +1568,9 @@
             const val = comp.clockPhase < highFor ? 1n : 0n
             return [val]
           }
+          case 'FSM': {
+            return evaluateFSMComponent(comp, inputs)
+          }
           default: {
             if (customLibrary[comp.type]) {
               return evaluateCustomComponent(comp, inputs, context)
@@ -1573,6 +1663,7 @@
 
       function resumeSimulation() {
         isPaused = false
+        lastBreakpointHit = null
         refreshHUD()
       }
 
@@ -1585,7 +1676,7 @@
         const prev = isPaused
         isPaused = true
         tick(count)
-        isPaused = prev
+        isPaused = !!lastBreakpointHit || prev
       }
 
       function normalizeTestbenchSequence(input) {
@@ -1836,7 +1927,8 @@
         const toggled = (wire.frameToggles || 0) > 1
 
         ctx.strokeStyle = toggled ? '#a855f7' : active ? '#fffa8b' : wireColor(wire)
-        ctx.lineWidth = toggled || active ? 3 : 2
+        const baseWidth = wire.bundle ? 4 : 2
+        ctx.lineWidth = toggled || active ? baseWidth + 1 : baseWidth
         if (wire.showFlow) {
           ctx.setLineDash([12, 10])
           ctx.lineDashOffset = -flowOffset
@@ -1864,6 +1956,13 @@
           const midX = (start.x + end.x) / 2
           const midY = (start.y + end.y) / 2
           drawBadge(midX, midY, `${wire.bitWidth}`, wireColor(wire))
+          if (wire.bundle) {
+            drawBadge(midX, midY - 16, `${wire.bundle}`, '#8b5cf6')
+          }
+        } else if (wire.bundle) {
+          const midX = (start.x + end.x) / 2
+          const midY = (start.y + end.y) / 2
+          drawBadge(midX, midY - 12, `${wire.bundle}`, '#8b5cf6')
         }
         wire.frameToggles = 0
       }
@@ -2069,6 +2168,27 @@
             ctx.font = '10px "JetBrains Mono"'
             ctx.fillText(`x${comp.properties.bitWidth}`, x + w / 2, y + h - 12)
           }
+          if (comp.type === 'FSM') {
+            const fsm = normalizeFsmDefinition(comp.properties.fsm)
+            const count = Math.min(4, fsm.states.length)
+            const radius = 10
+            for (let i = 0; i < count; i++) {
+              const angle = (i / count) * Math.PI * 2
+              const cx = x + w / 2 + Math.cos(angle) * 18
+              const cy = y + h / 2 + Math.sin(angle) * 12
+              ctx.beginPath()
+              ctx.fillStyle =
+                fsm.states[i]?.id === comp.fsmState ? '#22d3ee' : '#111827'
+              ctx.strokeStyle = '#22d3ee'
+              ctx.lineWidth = 1
+              ctx.arc(cx, cy, radius, 0, Math.PI * 2)
+              ctx.fill()
+              ctx.stroke()
+              ctx.fillStyle = '#e5e7eb'
+              ctx.font = '9px "JetBrains Mono"'
+              ctx.fillText(fsm.states[i]?.id || `S${i}`, cx, cy)
+            }
+          }
           if (comp.type === 'SPLITTER' || comp.type === 'MERGER') {
             ctx.fillStyle = '#888'
             ctx.font = '10px "JetBrains Mono"'
@@ -2171,6 +2291,77 @@
         stepBtn.onclick = () => stepSimulation(1)
         hud.appendChild(stepBtn)
 
+        const bpLabel = document.createElement('div')
+        bpLabel.style.fontSize = '11px'
+        bpLabel.style.color = '#cbd5f5'
+        bpLabel.textContent = 'Conditional Breakpoints'
+        hud.appendChild(bpLabel)
+        const bpRow = document.createElement('div')
+        bpRow.style.display = 'flex'
+        bpRow.style.gap = '6px'
+        const bpInput = document.createElement('input')
+        bpInput.className = 'themed-input'
+        bpInput.placeholder = 'PC==0xA0'
+        bpInput.style.flex = '1'
+        const bpAdd = document.createElement('button')
+        bpAdd.className = 'action'
+        bpAdd.innerText = 'Add BP'
+        bpAdd.onclick = () => {
+          if (bpInput.value.trim()) {
+            addBreakpoint(bpInput.value.trim())
+            bpInput.value = ''
+            refreshHUD()
+          }
+        }
+        bpRow.appendChild(bpInput)
+        bpRow.appendChild(bpAdd)
+        hud.appendChild(bpRow)
+
+        const bpList = document.createElement('div')
+        bpList.id = 'breakpoint-list'
+        bpList.style.display = 'flex'
+        bpList.style.flexDirection = 'column'
+        bpList.style.gap = '4px'
+        listBreakpoints().forEach((bp) => {
+          const row = document.createElement('div')
+          row.style.display = 'flex'
+          row.style.alignItems = 'center'
+          row.style.gap = '6px'
+          row.style.padding = '6px'
+          row.style.border = '1px solid #222'
+          row.style.borderRadius = '4px'
+          if (bp.hitAt !== null) row.classList.add('hit')
+          row.style.background = bp.hitAt !== null ? '#1f2937' : '#0b0b0b'
+          const enable = document.createElement('input')
+          enable.type = 'checkbox'
+          enable.checked = bp.enabled
+          enable.onchange = (e) => {
+            setBreakpointEnabled(bp.id, e.target.checked)
+            refreshHUD()
+          }
+          const text = document.createElement('span')
+          text.textContent = bp.expr
+          text.style.flex = '1'
+          text.style.fontSize = '11px'
+          text.style.color = '#e5e7eb'
+          const meta = document.createElement('span')
+          meta.style.fontSize = '10px'
+          meta.style.color = '#94a3b8'
+          meta.textContent = bp.hitAt !== null ? `hit@${bp.hitAt}` : 'idle'
+          const removeBtn = document.createElement('button')
+          removeBtn.innerText = '✕'
+          removeBtn.onclick = () => {
+            removeBreakpoint(bp.id)
+            refreshHUD()
+          }
+          row.appendChild(enable)
+          row.appendChild(text)
+          row.appendChild(meta)
+          row.appendChild(removeBtn)
+          bpList.appendChild(row)
+        })
+        hud.appendChild(bpList)
+
         const undoBtn = document.createElement('button')
         undoBtn.className = 'action'
         undoBtn.innerText = 'Undo'
@@ -2264,6 +2455,37 @@
           hud.appendChild(drcList)
         }
 
+        const bundleLabel = document.createElement('div')
+        bundleLabel.style.fontSize = '11px'
+        bundleLabel.style.color = '#cbd5f5'
+        bundleLabel.textContent = 'Bus Bundles'
+        hud.appendChild(bundleLabel)
+
+        const bundleBtn = document.createElement('button')
+        bundleBtn.className = 'action'
+        bundleBtn.innerText = 'Bundle wire...'
+        bundleBtn.onclick = () => {
+          const wireId = prompt('Wire id to bundle:')
+          if (!wireId) return
+          const width = parseInt(prompt('Bundle width:', '1') || '1', 10)
+          const name = prompt('Bundle name:', 'BUS')
+          if (!name) return
+          addWireToBundle(wireId, name, width)
+          refreshHUD()
+        }
+        hud.appendChild(bundleBtn)
+
+        const bundleList = document.createElement('div')
+        bundleList.style.fontSize = '10px'
+        bundleList.style.color = '#94a3b8'
+        bundleList.id = 'bundle-list'
+        listBundles().forEach((b) => {
+          const row = document.createElement('div')
+          row.textContent = `${b.name} (${b.width}-bit) [${b.members.length}]`
+          bundleList.appendChild(row)
+        })
+        hud.appendChild(bundleList)
+
         const tbLabel = document.createElement('div')
         tbLabel.style.fontSize = '11px'
         tbLabel.style.color = '#cbd5f5'
@@ -2340,6 +2562,74 @@
           tbStatus.textContent = 'Idle'
         }
         hud.appendChild(tbStatus)
+
+        const asmLabel = document.createElement('div')
+        asmLabel.style.fontSize = '11px'
+        asmLabel.style.color = '#cbd5f5'
+        asmLabel.textContent = 'Assembler & Hex'
+        hud.appendChild(asmLabel)
+
+        const isaArea = document.createElement('textarea')
+        isaArea.className = 'themed-input'
+        isaArea.style.height = '60px'
+        isaArea.id = 'asm-isa'
+        isaArea.value = assemblerState.isaText
+        isaArea.onchange = (e) => {
+          assemblerState.isaText = e.target.value
+        }
+        hud.appendChild(isaArea)
+
+        const asmArea = document.createElement('textarea')
+        asmArea.className = 'themed-input'
+        asmArea.style.height = '60px'
+        asmArea.id = 'asm-source'
+        asmArea.value = assemblerState.sourceText
+        asmArea.onchange = (e) => {
+          assemblerState.sourceText = e.target.value
+        }
+        hud.appendChild(asmArea)
+
+        const asmBtns = document.createElement('div')
+        asmBtns.style.display = 'flex'
+        asmBtns.style.gap = '6px'
+
+        const assembleBtn = document.createElement('button')
+        assembleBtn.className = 'action'
+        assembleBtn.innerText = 'Assemble'
+        assembleBtn.onclick = () => {
+          try {
+            assemblerState.lastBytes = Array.from(
+              assembleSource(assemblerState.isaText, assemblerState.sourceText) || []
+            )
+          } catch (err) {
+            alert(err?.message || 'Assembly failed')
+          }
+        }
+        asmBtns.appendChild(assembleBtn)
+
+        const asmLoadBtn = document.createElement('button')
+        asmLoadBtn.className = 'action'
+        asmLoadBtn.innerText = 'Load to ROM'
+        asmLoadBtn.onclick = () => {
+          try {
+            const target =
+              prompt('Target ROM component id:', components.find((c) => c.type === 'ROM')?.id) ||
+              null
+            if (!target) return
+            loadAssemblyIntoRom(target, assemblerState.isaText, assemblerState.sourceText)
+            alert(`Loaded ${assemblerState.lastBytes.length} bytes into ${target}`)
+          } catch (err) {
+            alert(err?.message || 'Load failed')
+          }
+        }
+        asmBtns.appendChild(asmLoadBtn)
+        hud.appendChild(asmBtns)
+
+        const asmStatus = document.createElement('div')
+        asmStatus.style.fontSize = '10px'
+        asmStatus.style.color = '#94a3b8'
+        asmStatus.textContent = `Last assemble: ${assemblerState.lastBytes.length} bytes`
+        hud.appendChild(asmStatus)
 
         const selectBtn = document.createElement('button')
         selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
@@ -2432,6 +2722,7 @@
             outputs: def.outputs,
             parameters: def.parameters || {},
           })),
+          bundles: listBundles(),
           main: {
             components: rootComps.map((c) => ({
               id: c.id,
@@ -2451,6 +2742,7 @@
               netName: w.netName || undefined,
               path: w.path || undefined,
               pathIsGrid: w.pathIsGrid || undefined,
+              bundle: w.bundle || undefined,
             })),
           },
         }
@@ -2499,6 +2791,471 @@
       function sanitizeId(name) {
         const s = String(name || 'n').replace(/[^a-zA-Z0-9_]/g, '_')
         return /^[0-9]/.test(s) ? `n_${s}` : s || 'n'
+      }
+
+      function buildSignalScope(extra = {}) {
+        const scope = { time: simTime, ...extra }
+        components.forEach((c) => {
+          const baseVal =
+            c.outputs[0]?.value ?? c.inputs[0]?.value ?? c.currentValue ?? 0n
+          scope[sanitizeId(c.id)] = Number(baseVal)
+          c.outputs.forEach((p) => {
+            scope[sanitizeId(`${c.id}_${p.id}`)] = Number(p.value ?? 0n)
+          })
+          c.inputs.forEach((p) => {
+            scope[sanitizeId(`${c.id}_${p.id}`)] = Number(p.value ?? 0n)
+          })
+        })
+        wires.forEach((w) => {
+          scope[sanitizeId(w.netName || w.id)] = Number(w.value ?? 0n)
+        })
+        return scope
+      }
+
+      function evalWithSignals(expr, extra = {}) {
+        if (!expr) return false
+        const scope = buildSignalScope(extra)
+        try {
+          const tokens = Array.from(new Set(expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []))
+          let rewritten = expr
+          tokens.forEach((name) => {
+            const value = scope[sanitizeId(name)] ?? scope[name] ?? 0
+            const re = new RegExp(`\\b${name}\\b`, 'g')
+            rewritten = rewritten.replace(re, String(value))
+          })
+          if (!/^[\d\s()+\-*/%<>=!&|]+$/.test(rewritten)) return false
+          const val = evaluateNumericExpression(rewritten)
+          return Boolean(val)
+        } catch (err) {
+          return false
+        }
+      }
+
+      function evaluateNumericExpression(expr) {
+        const tokens = expr.match(/(\d+|==|!=|>=|<=|&&|\|\||[()+\-*/%<>])/g)
+        if (!tokens || !tokens.length) return 0
+        const compact = expr.replace(/\s+/g, '')
+        if (tokens.join('') !== compact) return 0
+        let expectValue = true
+        let balance = 0
+        for (const t of tokens) {
+          if (t === '(') {
+            balance++
+            continue
+          }
+          if (t === ')') {
+            balance--
+            if (balance < 0 || expectValue) return 0
+            continue
+          }
+          if (/^\d+$/.test(t)) {
+            if (!expectValue) return 0
+            expectValue = false
+          } else {
+            if (expectValue) return 0
+            expectValue = true
+          }
+        }
+        if (balance !== 0 || expectValue) return 0
+        const prec = {
+          '||': 1,
+          '&&': 2,
+          '==': 3,
+          '!=': 3,
+          '>=': 4,
+          '<=': 4,
+          '>': 4,
+          '<': 4,
+          '+': 5,
+          '-': 5,
+          '*': 6,
+          '/': 6,
+          '%': 6,
+        }
+        const output = []
+        const ops = []
+        tokens.forEach((t) => {
+          if (/^\d+$/.test(t)) {
+            output.push(Number(t))
+          } else if (t === '(') {
+            ops.push(t)
+          } else if (t === ')') {
+            while (ops.length && ops[ops.length - 1] !== '(') {
+              output.push(ops.pop())
+            }
+            ops.pop()
+          } else {
+            while (
+              ops.length &&
+              ops[ops.length - 1] !== '(' &&
+              prec[ops[ops.length - 1]] >= prec[t]
+            ) {
+              output.push(ops.pop())
+            }
+            ops.push(t)
+          }
+        })
+        while (ops.length) output.push(ops.pop())
+        const stack = []
+        output.forEach((tok) => {
+          if (typeof tok === 'number') {
+            stack.push(tok)
+          } else {
+            const b = stack.pop() || 0
+            const a = stack.pop() || 0
+            switch (tok) {
+              case '+':
+                stack.push(a + b)
+                break
+              case '-':
+                stack.push(a - b)
+                break
+              case '*':
+                stack.push(a * b)
+                break
+              case '/':
+                stack.push(b === 0 ? 0 : Math.trunc(a / b))
+                break
+              case '%':
+                stack.push(b === 0 ? 0 : Math.trunc(a) % Math.trunc(b))
+                break
+              case '==':
+                stack.push(a === b ? 1 : 0)
+                break
+              case '!=':
+                stack.push(a !== b ? 1 : 0)
+                break
+              case '>':
+                stack.push(a > b ? 1 : 0)
+                break
+              case '<':
+                stack.push(a < b ? 1 : 0)
+                break
+              case '>=':
+                stack.push(a >= b ? 1 : 0)
+                break
+              case '<=':
+                stack.push(a <= b ? 1 : 0)
+                break
+              case '&&':
+                stack.push(a && b ? 1 : 0)
+                break
+              case '||':
+                stack.push(a || b ? 1 : 0)
+                break
+              default:
+                stack.push(0)
+            }
+          }
+        })
+        return stack.pop() || 0
+      }
+
+      function normalizeFsmDefinition(def) {
+        const base = def && typeof def === 'object' ? def : {}
+        const states =
+          Array.isArray(base.states) && base.states.length
+            ? base.states.map((s, idx) => ({
+                id: s.id || s.name || `S${idx}`,
+                label: s.label || s.id || s.name || `S${idx}`,
+                output: s.output ?? s.value ?? idx,
+              }))
+            : [
+                { id: 'S0', label: 'S0', output: 0 },
+                { id: 'S1', label: 'S1', output: 1 },
+              ]
+        const transitions = Array.isArray(base.transitions)
+          ? base.transitions.map((t) => ({
+              from: t.from || states[0].id,
+              to: t.to || t.target || states[0].id,
+              condition: t.condition || t.when || null,
+              action: t.action || null,
+            }))
+          : [
+              { from: states[0].id, to: states[1].id, condition: 'input!=0' },
+              { from: states[1].id, to: states[0].id, condition: 'input==0' },
+            ]
+        return {
+          states,
+          transitions,
+          initial: base.initial || base.start || states[0].id,
+        }
+      }
+
+      function evaluateFSMComponent(comp, inputs) {
+        const fsm = normalizeFsmDefinition(comp.properties.fsm)
+        comp.properties.fsm = fsm
+        if (!comp.fsmState) comp.fsmState = fsm.initial || fsm.states[0]?.id
+        const [inVal, clk] = inputs
+        const prevClock = comp.lastClock ?? 0n
+        const currentClk = clk ?? 0n
+        const rising = currentClk !== 0n && prevClock === 0n
+        if (rising) {
+          const scope = { input: Number(inVal ?? 0n), state: comp.fsmState }
+          const candidates = fsm.transitions.filter(
+            (t) => !t.from || t.from === comp.fsmState
+          )
+          const hit = candidates.find(
+            (t) => !t.condition || evalWithSignals(t.condition, scope)
+          )
+          if (hit) {
+            comp.fsmState = hit.to || comp.fsmState
+          }
+        }
+        comp.lastClock = currentClk
+        const idx = Math.max(
+          0,
+          fsm.states.findIndex((s) => s.id === comp.fsmState)
+        )
+        const selected = fsm.states[idx] || fsm.states[0]
+        const outVal = selected?.output ?? idx
+        return [maskValue(outVal, comp.outputs[0]?.bitWidth || 1)]
+      }
+
+      function addBreakpoint(expr) {
+        if (!expr) return null
+        const bp = {
+          id: makeId('bp'),
+          expr: String(expr),
+          enabled: true,
+          hitAt: null,
+        }
+        breakpoints.push(bp)
+        return bp
+      }
+
+      function removeBreakpoint(id) {
+        const idx = breakpoints.findIndex((b) => b.id === id)
+        if (idx >= 0) {
+          breakpoints.splice(idx, 1)
+          return true
+        }
+        return false
+      }
+
+      function setBreakpointEnabled(id, enabled) {
+        const bp = breakpoints.find((b) => b.id === id)
+        if (!bp) return false
+        bp.enabled = enabled
+        return true
+      }
+
+      function checkBreakpoints() {
+        lastBreakpointHit = null
+        breakpoints.forEach((bp) => {
+          if (!bp.enabled || !bp.expr) return
+          const result = evalWithSignals(bp.expr, { bp: bp.id })
+          if (result) {
+            bp.hitAt = simTime
+            lastBreakpointHit = bp
+            isPaused = true
+          }
+        })
+        if (lastBreakpointHit && !document.hidden) refreshHUD()
+      }
+
+      function listBreakpoints() {
+        return breakpoints.map((b) => ({ ...b }))
+      }
+
+      function clearBreakpoints() {
+        breakpoints.length = 0
+        lastBreakpointHit = null
+      }
+
+      function ensureBundle(name, width = 1) {
+        if (!name) return null
+        const key = String(name)
+        const widthBits = clampBits(width)
+        if (!bundles.has(key)) {
+          bundles.set(key, { name: key, width: widthBits, members: new Set() })
+        }
+        const entry = bundles.get(key)
+        entry.width = widthBits
+        return entry
+      }
+
+      function addWireToBundle(wireId, bundleName, width) {
+        const wire = wires.find((w) => w.id === wireId)
+        if (!wire) return false
+        const targetWidth = width || wire.bitWidth
+        const bundle = ensureBundle(bundleName, targetWidth)
+        if (!bundle) return false
+        const fromPort = getPort(wire.fromCompId, wire.fromPortId)
+        const toPort = getPort(wire.toCompId, wire.toPortId)
+        if (!fromPort || !toPort) return false
+        if (fromPort.bitWidth !== bundle.width || toPort.bitWidth !== bundle.width) return false
+        wire.bundle = bundle.name
+        wire.bitWidth = bundle.width
+        wire.netName = wire.netName || bundle.name
+        bundle.members.add(wire.id)
+        return true
+      }
+
+      function removeWireFromBundle(wireId) {
+        const wire = wires.find((w) => w.id === wireId)
+        if (!wire) return false
+        if (wire.bundle && bundles.has(wire.bundle)) {
+          bundles.get(wire.bundle).members.delete(wire.id)
+        }
+        wire.bundle = null
+        return true
+      }
+
+      function listBundles() {
+        return Array.from(bundles.values()).map((b) => ({
+          name: b.name,
+          width: b.width,
+          members: Array.from(b.members),
+        }))
+      }
+
+      function normalizeIsaDefinitions(defs) {
+        if (!defs) return []
+        if (typeof defs === 'string') {
+          return defs
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .map((line) => {
+              const [pat, tpl] = line.split('=>').map((s) => s.trim())
+              if (!pat) return null
+              return {
+                regex: new RegExp(pat, 'i'),
+                encode: tpl || '0',
+              }
+            })
+            .filter(Boolean)
+        }
+        if (Array.isArray(defs)) {
+          return defs.map((d) => {
+            const regex =
+              d.regex instanceof RegExp
+                ? d.regex
+                : d.pattern instanceof RegExp
+                ? d.pattern
+                : new RegExp(d.pattern || d.name || '.*', d.flags || 'i')
+            return { regex, encode: d.encode ?? d.value ?? 0 }
+          })
+        }
+        return []
+      }
+
+      function parseByteValue(val) {
+        if (typeof val === 'number') return val & BYTE_MASK
+        const s = String(val || '0').trim()
+        if (/^0x/i.test(s)) return parseInt(s, 16) & BYTE_MASK
+        if (/^0b/i.test(s)) return parseInt(s.slice(2), 2) & BYTE_MASK
+        return parseInt(s, 10) & BYTE_MASK
+      }
+
+      function encodeInstruction(def, match) {
+        if (!def) return []
+        if (typeof def.encode === 'function') {
+          const res = def.encode(match) ?? []
+          const arr = Array.isArray(res) ? res : [res]
+          return arr.map((v) => parseByteValue(v))
+        }
+        if (typeof def.encode === 'number') return [parseByteValue(def.encode)]
+        const tpl = String(def.encode || '')
+        if (!tpl.includes('${')) {
+          return tpl
+            .split(',')
+            .map((p) => p.trim())
+            .filter(Boolean)
+            .map((p) => parseByteValue(p))
+        }
+        const replaced = tpl.replace(/\$\{([^}]+)\}/g, (_, name) => {
+          if (!SAFE_IDENTIFIER_RE.test(name)) return '0'
+          const raw = match?.groups?.[name] ?? ''
+          return String(parseByteValue(raw))
+        })
+        return replaced
+          .split(',')
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .map((p) => parseByteValue(p))
+      }
+
+      function assembleSource(defs, source) {
+        const isa = normalizeIsaDefinitions(defs)
+        const src = typeof source === 'string' ? source : ''
+        const bytes = []
+        src
+          .split('\n')
+          .map((l) => {
+            const idx = l.search(/[#;]/)
+            if (idx === -1) return l.trim()
+            if (idx > 0 && l[idx - 1] === '\\') return l.trim()
+            return l.slice(0, idx).trim()
+          })
+          .filter(Boolean)
+          .forEach((line) => {
+            const def = isa.find((d) => d.regex.test(line))
+            if (!def) {
+              const safeLine = String(line || '').slice(0, ASM_ERROR_PREVIEW_CHARS)
+              throw new Error(`No rule for line: ${safeLine}`)
+            }
+            const match = line.match(def.regex)
+            bytes.push(...encodeInstruction(def, match))
+          })
+        assemblerState.lastBytes = bytes.slice()
+        return Uint8Array.from(bytes.map((b) => b & BYTE_MASK))
+      }
+
+      function loadAssemblyIntoRom(romId, defs, source) {
+        const bytes = assembleSource(defs, source)
+        const comp = components.find((c) => c.id === romId)
+        if (!comp) throw new Error('ROM not found')
+        const mem = ensureMemory(comp)
+        if (!mem) throw new Error('ROM memory unavailable')
+        mem.fill(0)
+        mem.set(Array.from(bytes).slice(0, mem.length))
+        queueComponent(comp, 0)
+        return bytes
+      }
+
+      function synthesizeFSM(def) {
+        const normalized = normalizeFsmDefinition(def)
+        const bits = clampBits(
+          Math.max(1, Math.ceil(Math.log2(Math.max(1, normalized.states.length))) || 1)
+        )
+        const componentsDef = [
+          { id: 'fsm_clk', type: 'INPUT', gx: 0, gy: 0, properties: { bitWidth: 1 } },
+          {
+            id: 'fsm_in',
+            type: 'INPUT',
+            gx: 0,
+            gy: 2,
+            properties: { bitWidth: clampBits(def?.inputWidth || 1) },
+          },
+          { id: 'state_reg', type: 'DFF', gx: 2, gy: 1, properties: { bitWidth: bits } },
+          { id: 'state_out', type: 'OUTPUT', gx: 5, gy: 1, properties: { bitWidth: bits } },
+        ]
+        const wiresDef = [
+          {
+            fromCompId: 'state_reg',
+            fromPortId: 'q',
+            toCompId: 'state_out',
+            toPortId: 'in',
+            bitWidth: bits,
+          },
+          {
+            fromCompId: 'fsm_clk',
+            fromPortId: 'out',
+            toCompId: 'state_reg',
+            toPortId: 'clk',
+            bitWidth: 1,
+          },
+          {
+            fromCompId: 'fsm_in',
+            fromPortId: 'out',
+            toCompId: 'state_reg',
+            toPortId: 'd',
+            bitWidth: bits,
+          },
+        ]
+        return { components: componentsDef, wires: wiresDef, definition: normalized }
       }
 
       function widthDecl(width) {
@@ -2740,6 +3497,10 @@
         wires = []
         probes.clear()
         drcFindings = []
+        bundles.clear()
+        if (Array.isArray(data.bundles)) {
+          data.bundles.forEach((b) => ensureBundle(b.name, b.width))
+        }
         resetSimulationClock()
         const lib = data.library || []
         lib.forEach((d) => {
@@ -2793,9 +3554,13 @@
             netName: w.netName || null,
             path: w.path || null,
             pathIsGrid: !!w.pathIsGrid,
+            bundle: w.bundle || null,
           })
           if (!wireObj.path) applyAutoRoute(wireObj)
           wires.push(wireObj)
+          if (wireObj.bundle) {
+            addWireToBundle(wireObj.id, wireObj.bundle, wireObj.bitWidth)
+          }
         })
         setMainContext(components, wires)
         seedInitialEvents()
@@ -2817,6 +3582,10 @@
         components = []
         wires = []
         probes.clear()
+        breakpoints.length = 0
+        lastBreakpointHit = null
+        bundles.clear()
+        assemblerState.lastBytes = []
         selectedComponents = []
         resetSimulationClock()
         drcFindings = []
@@ -2917,6 +3686,7 @@
             netName: w.netName || null,
             path: w.path || null,
             pathIsGrid: !!w.pathIsGrid,
+            bundle: w.bundle || null,
           })
           if (!wireObj.path) {
             const start = {
@@ -2957,6 +3727,7 @@
           netName: w.netName || null,
           path: w.path || null,
           pathIsGrid: w.pathIsGrid || false,
+          bundle: w.bundle || null,
         }))
         const inputs = components
           .filter((c) => c.type === 'INPUT')
@@ -3445,6 +4216,7 @@
       window.CircuitAPI = {
         load: apiLoad,
         tick: (count = 1) => stepSimulation(count),
+        isPaused: () => isPaused,
         readComponent: (id) => {
           const comp = components.find((c) => c.id === id)
           if (!comp) return null
@@ -3467,7 +4239,16 @@
             value: w.value,
             showFlow: !!w.showFlow,
             netName: w.netName || null,
+            bundle: w.bundle || null,
           })),
+        addBreakpoint: (expr) => addBreakpoint(expr),
+        listBreakpoints: () => listBreakpoints(),
+        removeBreakpoint: (id) => removeBreakpoint(id),
+        setBreakpointEnabled: (id, enabled) => setBreakpointEnabled(id, enabled),
+        clearBreakpoints: () => {
+          clearBreakpoints()
+          return true
+        },
         toggleWireFlow: (id, enable) => {
           const wire = wires.find((w) => w.id === id)
           if (!wire) return false
@@ -3490,6 +4271,10 @@
           })
           return Array.from(nets.entries()).map(([name, ids]) => ({ name, wires: ids }))
         },
+        bundleWire: (wireId, name, width) => addWireToBundle(wireId, name, width),
+        unbundleWire: (wireId) => removeWireFromBundle(wireId),
+        listBundles: () => listBundles(),
+        createBundle: (name, width) => !!ensureBundle(name, width),
         setSpeed: (hz) => setTickRate(hz),
         pause: () => pauseSimulation(),
         resume: () => resumeSimulation(),
@@ -3542,6 +4327,10 @@
           openHexEditor(comp)
           return true
         },
+        assemble: (defs, source) => Array.from(assembleSource(defs, source)),
+        loadAssembly: (romId, defs, source) =>
+          Array.from(loadAssemblyIntoRom(romId, defs, source)),
+        getAssemblerState: () => ({ ...assemblerState }),
         setTestbench: (seq) => {
           setTestbenchScript(seq)
           return true
@@ -3564,6 +4353,19 @@
           if (prev.gx !== comp.gx || prev.gy !== comp.gy) pushHistoryState('move')
           return true
         },
+        setFSM: (id, def) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return false
+          comp.properties.fsm = def
+          configureComponent(comp)
+          return true
+        },
+        getFSM: (id) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return null
+          return normalizeFsmDefinition(comp.properties.fsm)
+        },
+        synthesizeFSM: (def) => synthesizeFSM(def),
         enterCustomEdit: (name) => enterCustomEdit(name),
         exitCustomEdit: () => exitCustomEdit(),
       }

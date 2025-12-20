@@ -1,21 +1,5 @@
 ## OpenCircuit Roadmap (remaining items)
 
-14. **Conditional Breakpoints**
-    - User-defined expressions (e.g., `PC==0xA0`) evaluated each tick; pause when true.
-    - UI list to enable/disable; highlight when hit.
-
-15. **Visual FSM Editor**
-    - Graph view for states/transitions; edit labels/conditions/actions.
-    - “Synthesize” to gates/FFs; round-trip serialization.
-
-16. **Integrated Assembler & Hex Editor**
-    - Text editor for ISA definitions (regex-based) and assembly source.
-    - Assemble to binary and load into ROM; hex view/editor shares with memory primitive.
-
-17. **Bus Interfaces (Bundling)**
-    - Group wires into bundles (e.g., address/data); render as thick cable and allow breakout.
-    - Enforce width consistency and propagation.
-
 18. **Interactive Minimap & Smart Zoom**
     - HUD overlay of full map; semantic zoom (simplified rendering when zoomed out).
     - Click/drag to navigate; zoom to selection.

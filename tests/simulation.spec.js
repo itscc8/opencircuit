@@ -615,4 +615,175 @@ test.describe('Discrete tick simulation', () => {
     expect(values.before).toBe('1')
     expect(values.after).toBe('0')
   })
+
+  test('conditional breakpoints pause when expression matches', async ({ page }) => {
+    await gotoApp(page)
+    await loadFixture(page, 'not_loop')
+
+    const hitInfo = await page.evaluate(async () => {
+      window.CircuitAPI.addBreakpoint('out1!=0')
+      window.CircuitAPI.resume()
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      return {
+        paused: window.CircuitAPI.isPaused(),
+        hit: window.CircuitAPI.listBreakpoints().some((b) => b.hitAt !== null),
+      }
+    })
+
+    expect(hitInfo.hit).toBe(true)
+    expect(hitInfo.paused).toBe(true)
+    const bpList = await page.$('#breakpoint-list')
+    expect(bpList).not.toBeNull()
+  })
+
+  test('fsm component follows transition graph', async ({ page }) => {
+    await gotoApp(page)
+    const outVal = await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const clk = new Component(1, 1, 'INPUT', { bitWidth: 1 })
+      clk.id = 'clk'
+      const sig = new Component(1, 3, 'INPUT', { bitWidth: 1 })
+      sig.id = 'sig'
+      const fsm = new Component(3, 2, 'FSM', {
+        inputWidth: 1,
+        fsm: {
+          initial: 'IDLE',
+          states: [
+            { id: 'IDLE', output: 0 },
+            { id: 'SEEN', output: 1 },
+          ],
+          transitions: [
+            { from: 'IDLE', to: 'SEEN', condition: 'input!=0' },
+            { from: 'SEEN', to: 'IDLE', condition: 'input==0' },
+          ],
+        },
+      })
+      fsm.id = 'fsm1'
+      const out = new Component(6, 2, 'OUTPUT', { bitWidth: 1 })
+      out.id = 'out'
+      components.push(clk, sig, fsm, out)
+      wires.push(
+        new Wire({
+          fromCompId: clk.id,
+          fromPortId: 'out',
+          toCompId: fsm.id,
+          toPortId: 'clk',
+          bitWidth: 1,
+        })
+      )
+      wires.push(
+        new Wire({
+          fromCompId: sig.id,
+          fromPortId: 'out',
+          toCompId: fsm.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+      wires.push(
+        new Wire({
+          fromCompId: fsm.id,
+          fromPortId: 'state',
+          toCompId: out.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+      window.CircuitAPI.setInput('sig', 1)
+      window.CircuitAPI.setInput('clk', 0)
+      window.CircuitAPI.tick(1)
+      window.CircuitAPI.setInput('clk', 1)
+      window.CircuitAPI.tick(1)
+      return window.CircuitAPI.readComponent('out')?.inputs?.[0]?.value?.toString()
+    })
+
+    expect(outVal).toBe('1')
+    const synth = await page.evaluate(() => window.CircuitAPI.synthesizeFSM({ states: [] }))
+    expect(Array.isArray(synth.components)).toBe(true)
+  })
+
+  test('assembler loads bytes into ROM and hex editor view', async ({ page }) => {
+    await gotoApp(page)
+    const result = await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const addr = new Component(1, 1, 'INPUT', { bitWidth: 2 })
+      addr.id = 'addr'
+      const rom = new Component(4, 1, 'ROM', { size: 4, bitWidth: 8 })
+      rom.id = 'romx'
+      const out = new Component(7, 1, 'OUTPUT', { bitWidth: 8 })
+      out.id = 'out'
+      components.push(addr, rom, out)
+      wires.push(
+        new Wire({
+          fromCompId: addr.id,
+          fromPortId: 'out',
+          toCompId: rom.id,
+          toPortId: 'addr',
+          bitWidth: 2,
+        })
+      )
+      wires.push(
+        new Wire({
+          fromCompId: rom.id,
+          fromPortId: 'data',
+          toCompId: out.id,
+          toPortId: 'in',
+          bitWidth: 8,
+        })
+      )
+      const defs = [
+        { pattern: '^NOP$', encode: 0 },
+        {
+          pattern: '^LOAD (?<imm>0x[0-9a-fA-F]+|\\d+)$',
+          encode: (m) => parseInt(m.groups.imm),
+        },
+      ]
+      const bytes = window.CircuitAPI.loadAssembly('romx', defs, 'NOP\nLOAD 0x5A')
+      window.CircuitAPI.setInput('addr', 1)
+      window.CircuitAPI.tick(2)
+      return {
+        b0: bytes[0],
+        b1: bytes[1],
+        val: window.CircuitAPI.readComponent('out')?.inputs?.[0]?.value?.toString(16),
+      }
+    })
+
+    expect(result.b0).toBe(0)
+    expect(result.b1).toBe(0x5a)
+    expect(result.val).toBe('5a')
+  })
+
+  test('bundled buses keep width and propagate values', async ({ page }) => {
+    await gotoApp(page)
+    const info = await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const a = new Component(1, 1, 'INPUT', { bitWidth: 8 })
+      a.id = 'a'
+      const b = new Component(5, 1, 'OUTPUT', { bitWidth: 8 })
+      b.id = 'b'
+      components.push(a, b)
+      wires.push(
+        new Wire({
+          fromCompId: a.id,
+          fromPortId: 'out',
+          toCompId: b.id,
+          toPortId: 'in',
+          bitWidth: 8,
+        })
+      )
+      const wireId = window.CircuitAPI.getWires()[0].id
+      window.CircuitAPI.bundleWire(wireId, 'DATA', 8)
+      window.CircuitAPI.setInput('a', 0xaa)
+      window.CircuitAPI.tick(1)
+      return {
+        bundle: window.CircuitAPI.listBundles()[0],
+        out: window.CircuitAPI.readComponent('b')?.inputs?.[0]?.value?.toString(16),
+        wire: window.CircuitAPI.getWires()[0],
+      }
+    })
+
+    expect(info.bundle.width).toBe(8)
+    expect(info.wire.bundle).toBe('DATA')
+    expect(info.out).toBe('aa')
+  })
 })
