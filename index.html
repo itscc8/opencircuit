@@ -1300,7 +1300,7 @@
           if (!keep) {
             probes.delete(w.id)
             const dest = components.find((c) => c.id === w.toCompId)
-          if (dest) queueComponent(dest, gateDelay(dest.type))
+            if (dest) queueComponent(dest, gateDelay(dest.type))
           }
           return keep
         })
