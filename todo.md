@@ -1,25 +1,5 @@
 ## OpenCircuit Roadmap (remaining items)
 
-6. **Memory Primitives (RAM/ROM)**
-   - Backed by `Uint8Array`, support load/save, and a popup Hex Editor for viewing/editing contents.
-   - ROM load from file/assembler output; RAM runtime edits reflected in simulation.
-
-7. **Hierarchical Ports / Parameterized Modules**
-   - Add `parameters` object to custom components; support instantiation at variable widths (8/16/32/etc.).
-   - Internal generation loops based on parameters; serialization/deserialization updates.
-
-8. **Smart Orthogonal Auto-Routing**
-   - Manhattan routing (A* / Lee) to avoid components; reroute on drag; snap to grid.
-   - Respect bus widths and reserved keep-outs; minimal bends.
-
-9. **Named Nets (“Wireless” Connections)**
-   - Tag wires with net names; wires sharing name are electrically connected without drawings.
-   - UI to assign/rename; serialization and probe support.
-
-10. **Design Rule Checks (DRC)**
-    - Detect short circuits (multiple drivers), floating inputs, width mismatches, unconnected outputs.
-    - Surface warnings with icons and HUD list; jump-to-location.
-
 11. **Integrated Testbench Sequencer**
     - UI panel to script time-based input stimuli and expected outputs.
     - Run/stop, report pass/fail with diff; import/export sequences.
@@ -62,3 +42,6 @@
 21. **Keyboard Shortcut Mapper**
     - Settings UI to rebind defaults (W: Wire, R: Rotate, Del: Remove, Space: Toggle, S: Select, etc.).
     - Persist to storage; export/import mappings.
+   
+22. **CLI**
+    - Move js code from index.html to main.js. This can be imported by the html but also by cli.js because it contains all the main logic behind opencircuit. So esentially have two ways to run opencircuit: one from console via a node cli and one from the webbrowser.
