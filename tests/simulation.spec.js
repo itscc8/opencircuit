@@ -161,4 +161,69 @@ test.describe('Discrete tick simulation', () => {
 
     expect(new Set(values).size).toBeGreaterThan(1)
   })
+
+  test('verilog export produces sanitized module', async ({ page }) => {
+    await gotoApp(page)
+    await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const inp = new Component(1, 1, 'INPUT')
+      inp.id = 'in-1'
+      const not = new Component(3, 1, 'NOT')
+      not.id = 'not gate'
+      const out = new Component(5, 1, 'OUTPUT')
+      out.id = 'out-1'
+      components.push(inp, not, out)
+      wires.push(
+        new Wire({
+          fromCompId: inp.id,
+          fromPortId: 'out',
+          toCompId: not.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+      wires.push(
+        new Wire({
+          fromCompId: not.id,
+          fromPortId: 'out',
+          toCompId: out.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+    })
+
+    const verilog = await page.evaluate(() => window.CircuitAPI.exportVerilog('my-mod'))
+
+    expect(verilog).toContain('module my_mod(')
+    expect(verilog).toContain('input in_1;')
+    expect(verilog).toContain('output out_1;')
+  })
+
+  test('flow preview uses context menu shell', async ({ page }) => {
+    await gotoApp(page)
+    await page.getByRole('button', { name: 'Show Flow' }).click()
+    await expect(page.locator('#ctx-menu')).toBeVisible()
+    const imgSrc = await page.$eval('#ctx-menu img', (el) => el?.getAttribute('src') || '')
+    expect(imgSrc.startsWith('data:image/png;base64')).toBeTruthy()
+  })
+
+  test('logic analyzer offsets away from hud and controls are themed', async ({
+    page,
+  }) => {
+    await gotoApp(page)
+    const left = await page.$eval(
+      '#logic-analyzer',
+      (el) => parseInt(getComputedStyle(el).left, 10)
+    )
+    expect(left).toBeGreaterThanOrEqual(180)
+    const hasThemedSelect = await page.$eval('#logic-trigger-select', (el) =>
+      el.classList.contains('themed-input')
+    )
+    expect(hasThemedSelect).toBe(true)
+    const hasThemedSlider = await page.$eval('#hud input[type=\"range\"]', (el) =>
+      el.classList.contains('themed-input')
+    )
+    expect(hasThemedSlider).toBe(true)
+  })
 })

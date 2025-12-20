@@ -25,6 +25,9 @@
         overflow: hidden;
         background-color: #0f0f0f;
       }
+      :root {
+        --hud-offset: 200px;
+      }
 
       canvas {
         display: block;
@@ -98,6 +101,39 @@
       button:disabled {
         opacity: 0.4;
         cursor: not-allowed;
+      }
+      .themed-input {
+        background: #111827;
+        border: 1px solid #334155;
+        color: #cbd5f5;
+        border-radius: 6px;
+      }
+      .themed-input:focus {
+        outline: 1px solid #475569;
+      }
+      select.themed-input {
+        padding: 8px;
+      }
+      input[type='range'].themed-input {
+        width: 100%;
+        height: 8px;
+        accent-color: #a855f7;
+      }
+      input[type='range'].themed-input::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #a855f7;
+        border: 1px solid #c084fc;
+      }
+      input[type='range'].themed-input::-moz-range-thumb {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #a855f7;
+        border: 1px solid #c084fc;
       }
       button.danger {
         border-color: #522;
@@ -252,9 +288,9 @@
 
       #logic-analyzer {
         position: fixed;
-        left: 0;
+        left: var(--hud-offset);
         bottom: 0;
-        width: 100%;
+        width: calc(100% - var(--hud-offset));
         height: 140px;
         background: #0a0a0f;
         border-top: 1px solid #222;
@@ -328,6 +364,11 @@
       const MAX_BITS = 64
       const LOGIC_LOW = 0n
       const LOGIC_HIGH = 1n
+      const DEFAULT_NET = "1'b0"
+      const BLOB_CLEANUP_DELAY_MS = 500 // allow download to finish before revoking blob URLs
+      const HUD_OFFSET =
+        parseInt(getComputedStyle(document.documentElement).getPropertyValue('--hud-offset')) ||
+        200
 
       let components = []
       let wires = []
@@ -1438,7 +1479,8 @@
       function drawLogicAnalyzer() {
         laCanvas.style.display = logicAnalyzer.enabled ? 'block' : 'none'
         if (!logicAnalyzer.enabled) return
-        laCanvas.width = window.innerWidth
+        const canvasWidth = laCanvas.clientWidth || window.innerWidth - HUD_OFFSET
+        laCanvas.width = canvasWidth
         laCanvas.height = laCanvas.clientHeight || 140
         laCtx.fillStyle = '#0a0a0f'
         laCtx.fillRect(0, 0, laCanvas.width, laCanvas.height)
@@ -1637,6 +1679,13 @@
         modalBtn.onclick = () => openModal('save')
         hud.appendChild(modalBtn)
 
+        const verilogBtn = document.createElement('button')
+        verilogBtn.className = 'action'
+        verilogBtn.id = 'btn-export-verilog'
+        verilogBtn.innerText = 'Export Verilog'
+        verilogBtn.onclick = () => downloadVerilog()
+        hud.appendChild(verilogBtn)
+
         const pauseBtn = document.createElement('button')
         pauseBtn.className = 'action'
         pauseBtn.innerText = isPaused ? 'Resume' : 'Pause'
@@ -1660,6 +1709,7 @@
         speedLabel.innerText = `Speed: ${ticksPerSecond} Hz`
         const speedInput = document.createElement('input')
         speedInput.type = 'range'
+        speedInput.className = 'themed-input'
         speedInput.min = '1'
         speedInput.max = '240'
         speedInput.value = `${ticksPerSecond}`
@@ -1679,6 +1729,8 @@
 
         const laSelect = document.createElement('select')
         laSelect.style.width = '100%'
+        laSelect.className = 'themed-input'
+        laSelect.id = 'logic-trigger-select'
         laSelect.onchange = (e) => {
           logicAnalyzer.triggerWire = e.target.value || null
           logicAnalyzer.triggered = logicAnalyzer.triggerWire ? false : true
@@ -1695,6 +1747,13 @@
           laSelect.appendChild(opt)
         })
         hud.appendChild(laSelect)
+
+        const flowBtn = document.createElement('button')
+        flowBtn.className = 'action'
+        flowBtn.id = 'btn-flow-preview'
+        flowBtn.innerText = 'Show Flow'
+        flowBtn.onclick = (e) => showFlowPreview(e.currentTarget)
+        hud.appendChild(flowBtn)
 
         const selectBtn = document.createElement('button')
         selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
@@ -1838,10 +1897,10 @@
 
         function inputNet(comp, port) {
           const w = wireToInput.get(`${comp.id}:${port.id}`)
-          if (!w) return "1'b0"
+          if (!w) return DEFAULT_NET
           const src = compById.get(w.fromCompId)
           const srcPort = src?.outputs.find((p) => p.id === w.fromPortId)
-          if (!src || !srcPort) return "1'b0"
+          if (!src || !srcPort) return DEFAULT_NET
           return netForOutput(src, srcPort)
         }
 
@@ -1968,6 +2027,26 @@
         assigns.forEach((a) => lines.push(`  ${a}`))
         lines.push('endmodule')
         return lines.join('\n')
+      }
+
+      function downloadVerilog() {
+        const name = prompt('Module name for export?', 'circuit') || 'circuit'
+        const code = exportVerilog(name)
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(code).catch((err) => {
+            console.warn('Failed to copy Verilog code to clipboard', err)
+          })
+        } else {
+          console.warn('Clipboard API unavailable; skipped copying Verilog')
+        }
+        const blob = new Blob([code], { type: 'text/plain' })
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(blob)
+        a.download = `${sanitizeId(name)}.v`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        setTimeout(() => URL.revokeObjectURL(a.href), BLOB_CLEANUP_DELAY_MS)
       }
 
       function updateSaveTextarea() {
@@ -2175,6 +2254,34 @@
         ctxMenu.style.top = `${y}px`
         ctxMenu.classList.remove('hidden')
       }
+
+      function showFlowPreview(anchorEl) {
+        if (!anchorEl) return
+        hideContextMenu()
+        const img = new Image()
+        img.src = canvas.toDataURL('image/png')
+        img.alt = 'Flow preview'
+        img.style.maxWidth = '280px'
+        img.style.borderRadius = '6px'
+        img.style.display = 'block'
+        const title = document.createElement('div')
+        title.style.color = '#cbd5f5'
+        title.style.fontSize = '12px'
+        title.style.marginBottom = '6px'
+        title.textContent = 'Current Flow Snapshot'
+        ctxMenu.appendChild(title)
+        ctxMenu.appendChild(img)
+        const rect = anchorEl.getBoundingClientRect()
+        ctxMenu.style.left = `${rect.right + 8}px`
+        ctxMenu.style.top = `${rect.top}px`
+        ctxMenu.classList.remove('hidden')
+      }
+
+      document.addEventListener('pointerdown', (e) => {
+        if (!ctxMenu.classList.contains('hidden') && !ctxMenu.contains(e.target)) {
+          hideContextMenu()
+        }
+      })
 
       function hitTestWire(clientX, clientY) {
         const tolerance = 8
@@ -2513,6 +2620,7 @@
           queueComponent(comp, 0)
           return true
         },
+        exportVerilog: (moduleName) => exportVerilog(moduleName),
         reset: () => {
           clearAllState()
         },
