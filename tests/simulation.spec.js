@@ -3,6 +3,7 @@ const path = require('path')
 const fs = require('fs')
 
 const indexUrl = `file://${path.join(__dirname, '..', 'index.html')}`
+const CROSSHAIR_PIXEL_THRESHOLD = 120
 
 function readFixture(name) {
   const file = path.join(__dirname, '..', 'fixtures', `${name}.json`)
@@ -200,12 +201,52 @@ test.describe('Discrete tick simulation', () => {
     expect(verilog).toContain('output out_1;')
   })
 
-  test('flow preview uses context menu shell', async ({ page }) => {
+  test('wire context menu omits flow toggle and probes only arm on left click', async ({
+    page,
+  }) => {
     await gotoApp(page)
-    await page.getByRole('button', { name: 'Show Flow' }).click()
+    await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const a = new Component(2, 2, 'INPUT')
+      const b = new Component(6, 2, 'OUTPUT')
+      components.push(a, b)
+      wires.push(
+        new Wire({
+          fromCompId: a.id,
+          fromPortId: 'out',
+          toCompId: b.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+    })
+    const mid = await page.evaluate(() => {
+      const wire = wires[0]
+      const from = components.find((c) => c.id === wire.fromCompId)
+      const to = components.find((c) => c.id === wire.toCompId)
+      const start = portPosition(from, from.outputs[0])
+      const end = portPosition(to, to.inputs[0])
+      return { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 }
+    })
+    await page.evaluate(({ x, y }) => {
+      window.dispatchEvent(
+        new MouseEvent('contextmenu', { clientX: x, clientY: y, button: 2, bubbles: true })
+      )
+    }, mid)
     await expect(page.locator('#ctx-menu')).toBeVisible()
-    const imgSrc = await page.$eval('#ctx-menu img', (el) => el?.getAttribute('src') || '')
-    expect(imgSrc.startsWith('data:image/png;base64')).toBeTruthy()
+    const menuText = await page.locator('#ctx-menu').innerText()
+    expect(menuText.toLowerCase()).not.toContain('flow')
+    const afterRight = await page.evaluate(() => window.CircuitAPI.listProbes().length)
+    expect(afterRight).toBe(0)
+    await page.evaluate(() => hideContextMenu())
+    await page.evaluate(({ x, y }) => {
+      const canvas = document.getElementById('canvas')
+      canvas.dispatchEvent(
+        new PointerEvent('pointerdown', { clientX: x, clientY: y, button: 0, bubbles: true })
+      )
+    }, mid)
+    const afterLeft = await page.evaluate(() => window.CircuitAPI.listProbes().length)
+    expect(afterLeft).toBe(1)
   })
 
   test('logic analyzer offsets away from hud and controls are themed', async ({
@@ -225,6 +266,22 @@ test.describe('Discrete tick simulation', () => {
       el.classList.contains('themed-input')
     )
     expect(hasThemedSlider).toBe(true)
+  })
+
+  test('spotlight target ghost marks ctrl+k placement center', async ({ page }) => {
+    await gotoApp(page)
+    await page.waitForTimeout(30)
+    const pixelSum = await page.evaluate(() => {
+      const target = window.CircuitAPI.getSpotlightTarget()
+      const cam = window.CircuitAPI.getCamera()
+      const grid = 25
+      const cx = Math.round(target.x * grid + cam.x + grid / 2)
+      const cy = Math.round(target.y * grid + cam.y + grid / 2)
+      const ctx = document.getElementById('canvas').getContext('2d')
+      const data = ctx.getImageData(cx, cy, 1, 1).data
+      return data[0] + data[1] + data[2]
+    })
+    expect(pixelSum).toBeGreaterThan(CROSSHAIR_PIXEL_THRESHOLD)
   })
 
   test('memory primitives support load/save and runtime writes', async ({ page }) => {
