@@ -810,7 +810,7 @@ const canvas = document.getElementById('canvas')
         },
         OR: {
           label: 'OR',
-          color: '#a855f7',
+          color: '#00ffff',
           w: 2.5,
           h: 2,
           defaultProperties: { bitWidth: 1 },
@@ -1867,7 +1867,7 @@ const canvas = document.getElementById('canvas')
               ? '#ef4444'
               : '#22c55e'
           : toggled
-            ? '#a855f7'
+          ? '#00ffff'
             : active
               ? '#fffa8b'
               : wireColor(wire)
@@ -1895,12 +1895,12 @@ const canvas = document.getElementById('canvas')
           const midY = (start.y + end.y) / 2
           drawBadge(midX, midY, `${wire.bitWidth}`, wireColor(wire))
           if (wire.bundle) {
-            drawBadge(midX, midY - 16, `${wire.bundle}`, '#8b5cf6')
+          drawBadge(midX, midY - 16, `${wire.bundle}`, '#00ffff')
           }
         } else if (wire.bundle) {
           const midX = (start.x + end.x) / 2
           const midY = (start.y + end.y) / 2
-          drawBadge(midX, midY - 12, `${wire.bundle}`, '#8b5cf6')
+          drawBadge(midX, midY - 12, `${wire.bundle}`, '#00ffff')
         }
         wire.frameToggles = 0
       }
