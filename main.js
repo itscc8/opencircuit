@@ -128,6 +128,9 @@ const canvas = document.getElementById('canvas')
       const downloadBtn = document.getElementById('download-json')
       const applyLoadBtn = document.getElementById('apply-load')
       const ctxMenu = document.getElementById('ctx-menu')
+      const modeToggle = document.getElementById('mode-toggle')
+      const easyModeBtn = document.getElementById('btn-mode-easy')
+      const proModeBtn = document.getElementById('btn-mode-pro')
       const spotlightBackdrop = document.getElementById('spotlight-backdrop')
       const spotlightInput = document.getElementById('spotlight-input')
       const spotlightResults = document.getElementById('spotlight-results')
@@ -139,6 +142,7 @@ const canvas = document.getElementById('canvas')
       const shortcutReset = document.getElementById('shortcut-reset')
 
       const GRID_SIZE = 25
+      const SPOTLIGHT_DOT_SIZE = 2
       const PORT_RADIUS = 6
       const MAX_BITS = 64
       const LOGIC_LOW = 0n
@@ -163,6 +167,19 @@ const canvas = document.getElementById('canvas')
         select: 's',
       }
 
+      // Basic gates available when Easy mode is active.
+      const BASIC_TOOL_KEYS = new Set([
+        'INPUT',
+        'OUTPUT',
+        'NOT',
+        'AND',
+        'NAND',
+        'OR',
+        'NOR',
+        'XOR',
+        'XNOR',
+      ])
+      let proMode = true
       let components = []
       let wires = []
       const mainContext = {
@@ -191,7 +208,6 @@ const canvas = document.getElementById('canvas')
       let tickTimer = null
       const probes = new Map()
       const customLibrary = {}
-      let flowOffset = 0
       let viewScale = 1
       let lastViewScale = 1
       let minimapDragging = false
@@ -203,7 +219,7 @@ const canvas = document.getElementById('canvas')
       let shortcutMap = loadShortcuts()
       let shortcutBuffer = { ...shortcutMap }
       const logicAnalyzer = {
-        enabled: true,
+        enabled: false,
         triggerWire: null,
         triggered: true,
         cursor: null,
@@ -298,6 +314,17 @@ const canvas = document.getElementById('canvas')
           zoom: viewScale,
           camera: { x: camera.x, y: camera.y },
         }
+      }
+
+      // Returns true if a tool should be available in the current mode.
+      function toolEnabled(key) {
+        return proMode || BASIC_TOOL_KEYS.has(key) || !!customLibrary[key]
+      }
+
+      function setMode(isPro) {
+        proMode = !!isPro
+        updateModeButtons()
+        refreshHUD()
       }
 
       function loadShortcuts() {
@@ -618,7 +645,6 @@ const canvas = document.getElementById('canvas')
           this.bitWidth = clampBits(bitWidth)
           this.value = 0n
           this.frameToggles = 0
-          this.showFlow = false
           this.netName = netName || null
           this.path = path || null
           this.pathIsGrid = !!pathIsGrid
@@ -784,7 +810,7 @@ const canvas = document.getElementById('canvas')
         },
         OR: {
           label: 'OR',
-          color: '#a855f7',
+          color: '#00ffff',
           w: 2.5,
           h: 2,
           defaultProperties: { bitWidth: 1 },
@@ -1841,7 +1867,7 @@ const canvas = document.getElementById('canvas')
               ? '#ef4444'
               : '#22c55e'
           : toggled
-            ? '#a855f7'
+          ? '#00ffff'
             : active
               ? '#fffa8b'
               : wireColor(wire)
@@ -1849,10 +1875,6 @@ const canvas = document.getElementById('canvas')
         ctx.strokeStyle = baseColor
         const baseWidth = wire.bundle ? 4 : 2
         ctx.lineWidth = toggled || active || coverageEnabled ? baseWidth + 1 : baseWidth
-        if (wire.showFlow) {
-          ctx.setLineDash([12, 10])
-          ctx.lineDashOffset = -flowOffset
-        }
         ctx.lineCap = 'round'
         ctx.beginPath()
         const rawPoints =
@@ -1867,22 +1889,18 @@ const canvas = document.getElementById('canvas')
           ctx.lineTo(pathPoints[i].x, pathPoints[i].y)
         }
         ctx.stroke()
-        if (wire.showFlow) {
-          ctx.setLineDash([])
-          ctx.lineDashOffset = 0
-        }
 
         if (wire.bitWidth > 1) {
           const midX = (start.x + end.x) / 2
           const midY = (start.y + end.y) / 2
           drawBadge(midX, midY, `${wire.bitWidth}`, wireColor(wire))
           if (wire.bundle) {
-            drawBadge(midX, midY - 16, `${wire.bundle}`, '#8b5cf6')
+          drawBadge(midX, midY - 16, `${wire.bundle}`, '#00ffff')
           }
         } else if (wire.bundle) {
           const midX = (start.x + end.x) / 2
           const midY = (start.y + end.y) / 2
-          drawBadge(midX, midY - 12, `${wire.bundle}`, '#8b5cf6')
+          drawBadge(midX, midY - 12, `${wire.bundle}`, '#00ffff')
         }
         wire.frameToggles = 0
       }
@@ -2295,6 +2313,32 @@ const canvas = document.getElementById('canvas')
         }
       }
 
+      function drawSpotlightGhost() {
+        const target = getSpotlightTargetGrid()
+        const x = target.x * GRID_SIZE + camera.x
+        const y = target.y * GRID_SIZE + camera.y
+        const cx = x + GRID_SIZE / 2
+        const cy = y + GRID_SIZE / 2
+        const arm = GRID_SIZE * 0.4
+        const halfDot = SPOTLIGHT_DOT_SIZE / 2
+        ctx.save()
+        ctx.globalAlpha = 0.85
+        ctx.strokeStyle = '#00ffff'
+        ctx.lineWidth = 1
+        ctx.setLineDash([4, 4])
+        ctx.strokeRect(x + 2, y + 2, GRID_SIZE - 4, GRID_SIZE - 4)
+        ctx.setLineDash([])
+        ctx.beginPath()
+        ctx.moveTo(cx - arm, cy)
+        ctx.lineTo(cx + arm, cy)
+        ctx.moveTo(cx, cy - arm)
+        ctx.lineTo(cx, cy + arm)
+        ctx.stroke()
+        ctx.fillStyle = '#00ffff'
+        ctx.fillRect(cx - halfDot, cy - halfDot, SPOTLIGHT_DOT_SIZE, SPOTLIGHT_DOT_SIZE)
+        ctx.restore()
+      }
+
       function render() {
         if (lastViewScale !== viewScale) {
           ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0)
@@ -2304,10 +2348,10 @@ const canvas = document.getElementById('canvas')
         const sceneHeight = canvas.height / viewScale
         ctx.fillStyle = '#0f0f0f'
         ctx.fillRect(0, 0, sceneWidth, sceneHeight)
-        flowOffset = (flowOffset + 2) % 1000
         drawGrid()
         drawWires()
         drawAllComponents()
+        drawSpotlightGhost()
         drawLogicAnalyzer()
         if (selectionStart && selectionEnd) {
           const sx = Math.min(selectionStart.x, selectionEnd.x) * GRID_SIZE + camera.x
@@ -2377,6 +2421,7 @@ const canvas = document.getElementById('canvas')
         const bpRow = document.createElement('div')
         bpRow.style.display = 'flex'
         bpRow.style.gap = '6px'
+        bpRow.style.flexWrap = 'wrap'
         const bpInput = document.createElement('input')
         bpInput.className = 'themed-input'
         bpInput.placeholder = 'PC==0xA0'
@@ -2745,8 +2790,7 @@ const canvas = document.getElementById('canvas')
         hud.appendChild(asmArea)
 
         const asmBtns = document.createElement('div')
-        asmBtns.style.display = 'flex'
-        asmBtns.style.gap = '6px'
+        asmBtns.className = 'asm-buttons'
 
         const assembleBtn = document.createElement('button')
         assembleBtn.className = 'action'
@@ -2815,6 +2859,7 @@ const canvas = document.getElementById('canvas')
         hud.appendChild(sep)
 
         Object.keys(TOOLS).forEach((key) => {
+          if (!toolEnabled(key)) return
           if (customLibrary[key]) return
           const def = TOOLS[key]
           const btn = document.createElement('button')
@@ -2899,7 +2944,6 @@ const canvas = document.getElementById('canvas')
               from: { comp: w.fromCompId, port: w.fromPortId },
               to: { comp: w.toCompId, port: w.toPortId },
               bitWidth: w.bitWidth,
-              showFlow: !!w.showFlow,
               netName: w.netName || undefined,
               path: w.path || undefined,
               pathIsGrid: w.pathIsGrid || undefined,
@@ -3711,7 +3755,6 @@ const canvas = document.getElementById('canvas')
             toCompId: toComp.id,
             toPortId: toPort.id,
             bitWidth,
-            showFlow: !!w.showFlow,
             netName: w.netName || null,
             path: w.path || null,
             pathIsGrid: !!w.pathIsGrid,
@@ -4051,6 +4094,17 @@ const canvas = document.getElementById('canvas')
         ctxMenu.innerHTML = ''
       }
 
+      function updateModeButtons() {
+        if (!easyModeBtn || !proModeBtn) return
+        if (proMode) {
+          proModeBtn.classList.add('active')
+          easyModeBtn.classList.remove('active')
+        } else {
+          easyModeBtn.classList.add('active')
+          proModeBtn.classList.remove('active')
+        }
+      }
+
       function showContextMenu(x, y, items) {
         ctxMenu.innerHTML = ''
         items.forEach((item) => {
@@ -4189,17 +4243,29 @@ const canvas = document.getElementById('canvas')
         applyLoadBtn.addEventListener('click', handleLoad)
       }
 
+      function initModeToggle() {
+        if (!easyModeBtn || !proModeBtn) return
+        easyModeBtn.addEventListener('click', () => setMode(false))
+        proModeBtn.addEventListener('click', () => setMode(true))
+        updateModeButtons()
+      }
+
+      function getSpotlightTargetGrid() {
+        return {
+          x: Math.round((canvas.width / (2 * viewScale) - camera.x) / GRID_SIZE),
+          y: Math.round((canvas.height / (2 * viewScale) - camera.y) / GRID_SIZE),
+        }
+      }
+
       function buildSpotlightItems() {
         const items = []
+        const centerGrid = getSpotlightTargetGrid()
         Object.keys(TOOLS).forEach((type) => {
+          if (!toolEnabled(type)) return
           items.push({
             id: `create-${type}`,
             label: `Create ${type}`,
             action: () => {
-              const centerGrid = {
-                x: Math.round((canvas.width / (2 * viewScale) - camera.x) / GRID_SIZE),
-                y: Math.round((canvas.height / (2 * viewScale) - camera.y) / GRID_SIZE),
-              }
               placeFromPalette(centerGrid.x, centerGrid.y, type)
               refreshHUD()
             },
@@ -4210,10 +4276,6 @@ const canvas = document.getElementById('canvas')
             id: `create-${type}`,
             label: `Create ${type}`,
             action: () => {
-              const centerGrid = {
-                x: Math.round((canvas.width / (2 * viewScale) - camera.x) / GRID_SIZE),
-                y: Math.round((canvas.height / (2 * viewScale) - camera.y) / GRID_SIZE),
-              }
               placeFromPalette(centerGrid.x, centerGrid.y, type)
               refreshHUD()
             },
@@ -4395,7 +4457,9 @@ const canvas = document.getElementById('canvas')
         if (draggingFromMenu) return
 
         if (!portHit && wireHit) {
-          toggleProbe(wireHit)
+          if (e.button === 0) {
+            toggleProbe(wireHit)
+          }
           return
         }
 
@@ -4545,12 +4609,6 @@ const canvas = document.getElementById('canvas')
             },
           })
           items.push({
-            label: wireHit.showFlow ? 'Hide flow' : 'Show flow',
-            action: () => {
-              wireHit.showFlow = !wireHit.showFlow
-            },
-          })
-          items.push({
             label: 'Set net name',
             action: () => {
               const next = prompt('Net name', wireHit.netName || '')
@@ -4685,6 +4743,7 @@ const canvas = document.getElementById('canvas')
         tick: (count = 1) => stepSimulation(count),
         isPaused: () => isPaused,
         getViewState: () => getViewState(),
+        getSpotlightTarget: () => getSpotlightTargetGrid(),
         setZoom: (z) => {
           setZoom(z)
           return getViewState()
@@ -4713,7 +4772,6 @@ const canvas = document.getElementById('canvas')
             to: { comp: w.toCompId, port: w.toPortId },
             bitWidth: w.bitWidth,
             value: w.value,
-            showFlow: !!w.showFlow,
             netName: w.netName || null,
             bundle: w.bundle || null,
           })),
@@ -4723,12 +4781,6 @@ const canvas = document.getElementById('canvas')
         setBreakpointEnabled: (id, enabled) => setBreakpointEnabled(id, enabled),
         clearBreakpoints: () => {
           clearBreakpoints()
-          return true
-        },
-        toggleWireFlow: (id, enable) => {
-          const wire = wires.find((w) => w.id === id)
-          if (!wire) return false
-          wire.showFlow = enable === undefined ? !wire.showFlow : Boolean(enable)
           return true
         },
         setNetName: (id, name) => {
@@ -4747,6 +4799,7 @@ const canvas = document.getElementById('canvas')
           })
           return Array.from(nets.entries()).map(([name, ids]) => ({ name, wires: ids }))
         },
+        listProbes: () => Array.from(probes.keys()),
         enableCoverage: (enable = true) => {
           setCoverageEnabled(enable)
           return coverageEnabled
@@ -4874,6 +4927,7 @@ const canvas = document.getElementById('canvas')
       function init() {
         canvas.width = window.innerWidth
         canvas.height = window.innerHeight
+        initModeToggle()
         refreshHUD()
         initModalEvents()
         pushHistoryState('init')
