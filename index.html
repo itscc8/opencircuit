@@ -326,6 +326,8 @@
       const GRID_SIZE = 25
       const PORT_RADIUS = 6
       const MAX_BITS = 64
+      const LOGIC_LOW = 0n
+      const LOGIC_HIGH = 1n
 
       let components = []
       let wires = []
@@ -733,8 +735,9 @@
                 bitWidth: bits,
               }),
             ]
-            c.stateValue = c.stateValue ?? 0n
-            c.lastClock = c.lastClock ?? 0n
+            c.stateValue = 0n
+            c.lastClock = 0n
+            c.properties.selfSchedule = !!c.properties.selfSchedule
           },
         },
         CLOCK: {
