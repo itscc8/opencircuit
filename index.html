@@ -333,6 +333,23 @@
       let tickTimer = null
       const probes = new Map()
       const customLibrary = {}
+      const GATE_DELAYS = {
+        INPUT: 0,
+        OUTPUT: 0,
+        SPLITTER: 0,
+        MERGER: 0,
+        NOT: 1,
+        AND: 1,
+        NAND: 1,
+        OR: 1,
+        NOR: 1,
+        XOR: 1,
+        XNOR: 1,
+      }
+      let simTime = 0
+      const eventQueue = []
+      const scheduledComponents = new Map()
+      const MAX_EVENTS_PER_TICK = 5000
 
       function clampBits(value, fallback = 1) {
         const n = Number(value)
@@ -352,6 +369,92 @@
 
       function makeId(prefix) {
         return `${prefix}_${Math.random().toString(36).slice(2, 9)}`
+      }
+
+      function gateDelay(type) {
+        return GATE_DELAYS[type] ?? 1
+      }
+
+      function resetSimulationClock() {
+        simTime = 0
+        eventQueue.length = 0
+        scheduledComponents.clear()
+      }
+
+      function queueComponent(comp, delay = gateDelay(comp?.type)) {
+        if (!comp) return
+        const time = simTime + Math.max(0, delay)
+        const existing = scheduledComponents.get(comp.id)
+        if (existing !== undefined && existing <= time) return
+        scheduledComponents.set(comp.id, time)
+        eventQueue.push({ time, compId: comp.id })
+      }
+
+      function processEventsUntil(targetTime) {
+        let processed = 0
+        while (eventQueue.length) {
+          eventQueue.sort((a, b) => a.time - b.time)
+          const next = eventQueue[0]
+          if (!next || next.time > targetTime) break
+          if (processed++ > MAX_EVENTS_PER_TICK) break
+          const evt = eventQueue.shift()
+          const expected = scheduledComponents.get(evt.compId)
+          if (expected !== evt.time) continue
+          scheduledComponents.delete(evt.compId)
+          simTime = Math.max(simTime, evt.time)
+          const comp = components.find((c) => c.id === evt.compId)
+          if (comp) evaluateAndPropagate(comp)
+        }
+        simTime = Math.max(simTime, targetTime)
+      }
+
+      function evaluateAndPropagate(comp) {
+        const inputs = comp.inputs.map((port) => {
+          const wire = wires.find(
+            (w) => w.toCompId === comp.id && w.toPortId === port.id
+          )
+          const val = maskValue(wire ? wire.value : port.value ?? 0n, port.bitWidth)
+          port.value = val
+          return val
+        })
+        const outputs = evaluateComponent(comp, inputs, { components, wires })
+        if (comp.type === 'OUTPUT') {
+          comp.isLit = (inputs[0] ?? 0n) !== 0n
+        }
+        let outputChanged = false
+        comp.outputs.forEach((port, idx) => {
+          const newVal = maskValue(outputs[idx] ?? 0n, port.bitWidth)
+          if (port.value !== newVal) {
+            port.value = newVal
+            comp.currentValue = newVal
+            comp.nextValue = newVal
+            outputChanged = true
+            wires.forEach((w) => {
+              if (w.fromCompId === comp.id && w.fromPortId === port.id) {
+                if (w.value !== newVal) {
+                  w.frameToggles = (w.frameToggles || 0) + 1
+                  w.value = newVal
+                  const dest = components.find((c) => c.id === w.toCompId)
+                  if (dest) queueComponent(dest, gateDelay(dest.type))
+                }
+                if (probes.has(w.id)) {
+                  const probe = probes.get(w.id)
+                  probe.history.push(newVal)
+                  if (probe.history.length > 50) probe.history.shift()
+                }
+              }
+            })
+          }
+        })
+        if (outputChanged && comp.inputs.length === 0) {
+          queueComponent(comp, gateDelay(comp.type))
+        }
+      }
+
+      function seedInitialEvents() {
+        scheduledComponents.clear()
+        eventQueue.length = 0
+        components.forEach((c) => queueComponent(c, 0))
       }
 
       class Port {
@@ -412,6 +515,7 @@
         comp.h = def.h
         def.setup(comp)
         pruneWiresForComponent(comp)
+        queueComponent(comp, 0)
       }
 
       const TOOLS = {
@@ -778,12 +882,17 @@
             bitWidth: from.port.bitWidth,
           })
         )
+        queueComponent(to.component, gateDelay(to.component.type))
       }
 
       function removeComponent(comp) {
         wires = wires.filter((w) => {
           const keep = w.fromCompId !== comp.id && w.toCompId !== comp.id
-          if (!keep) probes.delete(w.id)
+          if (!keep) {
+            probes.delete(w.id)
+            const dest = components.find((c) => c.id === w.toCompId)
+            if (dest) queueComponent(dest, gateDelay(dest.type))
+          }
           return keep
         })
         const idx = components.indexOf(comp)
@@ -836,7 +945,8 @@
       }
 
       function tickOnce() {
-        runTickFor(components, wires)
+        const target = simTime + 1
+        processEventsUntil(target)
       }
 
       function tick(count = 1) {
@@ -1529,6 +1639,7 @@
         components = []
         wires = []
         probes.clear()
+        resetSimulationClock()
         const lib = data.library || []
         lib.forEach((d) => {
           if (!d.name) return
@@ -1577,7 +1688,8 @@
             })
           )
         })
-        tickOnce()
+        seedInitialEvents()
+        processEventsUntil(simTime)
       }
 
       function openModal(tab = 'save') {
@@ -1595,6 +1707,8 @@
         wires = []
         probes.clear()
         selectedComponents = []
+        resetSimulationClock()
+        seedInitialEvents()
       }
 
       function saveCustomComponent() {
@@ -1659,7 +1773,9 @@
         const tmpl = customLibrary[name]
         if (!tmpl) return
         if (checkCollision(gx, gy, name)) return
-        components.push(new Component(gx, gy, name))
+        const comp = new Component(gx, gy, name)
+        components.push(comp)
+        queueComponent(comp, 0)
       }
 
       function placeFromPalette(gx, gy, type) {
@@ -1668,7 +1784,9 @@
           return
         }
         if (!checkCollision(gx, gy, type)) {
-          components.push(new Component(gx, gy, type))
+          const comp = new Component(gx, gy, type)
+          components.push(comp)
+          queueComponent(comp, 0)
         }
       }
 
@@ -1819,6 +1937,7 @@
             const h = compHit.h * GRID_SIZE
             if (relX > pad && relX < w - pad && relY > pad && relY < h - pad) {
               compHit.state = !compHit.state
+              queueComponent(compHit, 0)
               return
             }
           }
@@ -1918,6 +2037,8 @@
             action: () => {
               probes.delete(wireHit.id)
               wires = wires.filter((w) => w !== wireHit)
+              const dest = components.find((c) => c.id === wireHit.toCompId)
+              if (dest) queueComponent(dest, gateDelay(dest.type))
             },
           })
         }
@@ -2011,6 +2132,7 @@
           } else {
             comp.overrideValue = BigInt(value)
           }
+          queueComponent(comp, 0)
           return true
         },
         reset: () => {
