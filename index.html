@@ -296,12 +296,83 @@
         border-top: 1px solid #222;
         z-index: 5;
       }
+
+      #minimap {
+        position: fixed;
+        bottom: 12px;
+        right: 12px;
+        width: 200px;
+        height: 200px;
+        background: #0b0b0b;
+        border: 1px solid #222;
+        border-radius: 6px;
+        z-index: 6;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+        cursor: crosshair;
+      }
+
+      .spotlight-backdrop {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.55);
+        z-index: 50;
+      }
+      .spotlight {
+        width: min(720px, 95vw);
+        background: #0f0f0f;
+        border: 1px solid #333;
+        border-radius: 12px;
+        padding: 14px;
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+      }
+      .spotlight.hidden,
+      .spotlight-backdrop.hidden {
+        display: none;
+      }
+      .spotlight input {
+        width: 100%;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid #334155;
+        background: #0b1224;
+        color: #e5e7eb;
+        margin-bottom: 10px;
+      }
+      .spotlight-results {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 320px;
+        overflow-y: auto;
+      }
+      .spotlight-results button {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .shortcut-modal .modal {
+        width: min(520px, 92vw);
+      }
+      .shortcut-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .shortcut-row input {
+        flex: 1;
+        padding: 8px;
+      }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
     <div class="hud" id="hud"></div>
     <canvas id="logic-analyzer"></canvas>
+    <canvas id="minimap" aria-label="Minimap overview"></canvas>
 
     <div class="modal-backdrop hidden" id="modal-backdrop">
       <div class="modal">
@@ -338,6 +409,33 @@
       </div>
     </div>
 
+    <div class="spotlight-backdrop hidden" id="spotlight-backdrop">
+      <div class="spotlight">
+        <input
+          id="spotlight-input"
+          type="text"
+          placeholder="Search commands or components..."
+          aria-label="Spotlight search"
+        />
+        <div class="spotlight-results" id="spotlight-results"></div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden shortcut-modal" id="shortcut-backdrop">
+      <div class="modal">
+        <button class="close" id="shortcut-close" aria-label="Close shortcut mapper">
+          ✕
+        </button>
+        <h3 style="margin-bottom: 8px; color: #e5e7eb">Shortcut Mapper</h3>
+        <div id="shortcut-list"></div>
+        <div class="actions">
+          <button id="shortcut-export">Export</button>
+          <button id="shortcut-import">Import</button>
+          <button id="shortcut-reset">Reset Defaults</button>
+        </div>
+      </div>
+    </div>
+
     <div class="context-menu hidden" id="ctx-menu"></div>
 
     <script>
@@ -346,6 +444,8 @@
       const hud = document.getElementById('hud')
       const laCanvas = document.getElementById('logic-analyzer')
       const laCtx = laCanvas.getContext('2d')
+      const minimapCanvas = document.getElementById('minimap')
+      const minimapCtx = minimapCanvas.getContext('2d')
 
       const modalBackdrop = document.getElementById('modal-backdrop')
       const modalClose = document.getElementById('modal-close')
@@ -358,6 +458,15 @@
       const downloadBtn = document.getElementById('download-json')
       const applyLoadBtn = document.getElementById('apply-load')
       const ctxMenu = document.getElementById('ctx-menu')
+      const spotlightBackdrop = document.getElementById('spotlight-backdrop')
+      const spotlightInput = document.getElementById('spotlight-input')
+      const spotlightResults = document.getElementById('spotlight-results')
+      const shortcutBackdrop = document.getElementById('shortcut-backdrop')
+      const shortcutList = document.getElementById('shortcut-list')
+      const shortcutClose = document.getElementById('shortcut-close')
+      const shortcutExport = document.getElementById('shortcut-export')
+      const shortcutImport = document.getElementById('shortcut-import')
+      const shortcutReset = document.getElementById('shortcut-reset')
 
       const GRID_SIZE = 25
       const PORT_RADIUS = 6
@@ -374,6 +483,15 @@
       const BYTE_MASK_BIG = 0xffn
       const SAFE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
       const ASM_ERROR_PREVIEW_CHARS = 120
+      const MIN_ZOOM = 0.4
+      const MAX_ZOOM = 2
+      const DEFAULT_SHORTCUTS = {
+        wire: 'w',
+        rotate: 'r',
+        remove: 'delete',
+        toggle: 'space',
+        select: 's',
+      }
 
       let components = []
       let wires = []
@@ -404,6 +522,14 @@
       const probes = new Map()
       const customLibrary = {}
       let flowOffset = 0
+      let viewScale = 1
+      let minimapDragging = false
+      let spotlightOpen = false
+      let lastPointerScene = { x: 0, y: 0 }
+      let coverageEnabled = false
+      const coverageStats = new Map()
+      let shortcutMap = loadShortcuts()
+      let shortcutBuffer = { ...shortcutMap }
       const logicAnalyzer = {
         enabled: true,
         triggerWire: null,
@@ -471,6 +597,69 @@
 
       function makeId(prefix) {
         return `${prefix}_${Math.random().toString(36).slice(2, 9)}`
+      }
+
+      function clientToScene(pos) {
+        return { x: pos.x / viewScale, y: pos.y / viewScale }
+      }
+
+      function clampZoom(z) {
+        const n = Number(z)
+        if (!Number.isFinite(n)) return viewScale
+        return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, n))
+      }
+
+      function setZoom(nextZoom, focus = { x: canvas.width / 2, y: canvas.height / 2 }) {
+        const target = clampZoom(nextZoom)
+        const sceneFocus = clientToScene(focus)
+        const worldX = sceneFocus.x - camera.x
+        const worldY = sceneFocus.y - camera.y
+        viewScale = target
+        camera.x = focus.x / viewScale - worldX
+        camera.y = focus.y / viewScale - worldY
+      }
+
+      function getViewState() {
+        return {
+          zoom: viewScale,
+          camera: { x: camera.x, y: camera.y },
+        }
+      }
+
+      function loadShortcuts() {
+        try {
+          const raw = localStorage.getItem('oc_shortcuts')
+          if (raw) {
+            const parsed = JSON.parse(raw)
+            return { ...DEFAULT_SHORTCUTS, ...parsed }
+          }
+        } catch (err) {
+          console.warn('Shortcut load failed', err)
+        }
+        return { ...DEFAULT_SHORTCUTS }
+      }
+
+      function persistShortcuts(next) {
+        shortcutMap = { ...DEFAULT_SHORTCUTS, ...next }
+        shortcutBuffer = { ...shortcutMap }
+        try {
+          localStorage.setItem('oc_shortcuts', JSON.stringify(shortcutMap))
+        } catch (err) {
+          console.warn('Shortcut save failed', err)
+        }
+      }
+
+      function normalizeKeyBinding(key) {
+        if (!key) return ''
+        const k = key.toString().trim().toLowerCase()
+        if (k === ' ') return 'space'
+        if (k === 'del') return 'delete'
+        return k
+      }
+
+      function findShortcutAction(key) {
+        const norm = normalizeKeyBinding(key)
+        return Object.entries(shortcutMap).find(([, val]) => normalizeKeyBinding(val) === norm)?.[0]
       }
 
       function gateDelay(type) {
@@ -681,6 +870,20 @@
         })
         drcFindings = warnings
         return warnings
+      }
+
+      function clearCoverage() {
+        coverageStats.clear()
+        wires.forEach((w) => {
+          w.frameToggles = 0
+        })
+      }
+
+      function setCoverageEnabled(enable) {
+        coverageEnabled = !!enable
+        if (coverageEnabled) {
+          clearCoverage()
+        }
       }
 
       function seedInitialEvents() {
@@ -1302,13 +1505,15 @@
       }
 
       function hitTestPort(clientX, clientY) {
+        const sceneX = clientX / viewScale
+        const sceneY = clientY / viewScale
         let hit = null
         components.forEach((comp) => {
           const ports = [...comp.inputs, ...comp.outputs]
           ports.forEach((port) => {
             const pos = portPosition(comp, port)
-            const dx = clientX - pos.x
-            const dy = clientY - pos.y
+            const dx = sceneX - pos.x
+            const dy = sceneY - pos.y
             if (Math.hypot(dx, dy) <= PORT_RADIUS + 4) {
               hit = { component: comp, port }
             }
@@ -1791,30 +1996,33 @@
       }
 
       function getGrid(clientPos) {
+        const scene = clientToScene(clientPos)
         return {
-          x: Math.floor((clientPos.x - camera.x) / GRID_SIZE),
-          y: Math.floor((clientPos.y - camera.y) / GRID_SIZE),
+          x: Math.floor((scene.x - camera.x) / GRID_SIZE),
+          y: Math.floor((scene.y - camera.y) / GRID_SIZE),
         }
       }
 
       function drawGrid() {
+        const width = canvas.width / viewScale
+        const height = canvas.height / viewScale
         ctx.strokeStyle = '#1f1f1f'
         ctx.lineWidth = 1
 
         const startX = ((-camera.x / GRID_SIZE) | 0) * GRID_SIZE + camera.x
         const startY = ((-camera.y / GRID_SIZE) | 0) * GRID_SIZE + camera.y
 
-        for (let x = startX; x < canvas.width; x += GRID_SIZE) {
+        for (let x = startX; x < width; x += GRID_SIZE) {
           ctx.beginPath()
           ctx.moveTo(x, 0)
-          ctx.lineTo(x, canvas.height)
+          ctx.lineTo(x, height)
           ctx.stroke()
         }
 
-        for (let y = startY; y < canvas.height; y += GRID_SIZE) {
+        for (let y = startY; y < height; y += GRID_SIZE) {
           ctx.beginPath()
           ctx.moveTo(0, y)
-          ctx.lineTo(canvas.width, y)
+          ctx.lineTo(width, y)
           ctx.stroke()
         }
       }
@@ -1926,9 +2134,29 @@
         const active = wire.value !== 0n
         const toggled = (wire.frameToggles || 0) > 1
 
-        ctx.strokeStyle = toggled ? '#a855f7' : active ? '#fffa8b' : wireColor(wire)
+        if (coverageEnabled) {
+          coverageStats.set(
+            wire.id,
+            (coverageStats.get(wire.id) || 0) + (wire.frameToggles || 0)
+          )
+        }
+
+        const coverageHits = coverageStats.get(wire.id) || 0
+        const baseColor = coverageEnabled
+          ? coverageHits === 0
+            ? '#4b5563'
+            : coverageHits > 10
+              ? '#ef4444'
+              : '#22c55e'
+          : toggled
+            ? '#a855f7'
+            : active
+              ? '#fffa8b'
+              : wireColor(wire)
+
+        ctx.strokeStyle = baseColor
         const baseWidth = wire.bundle ? 4 : 2
-        ctx.lineWidth = toggled || active ? baseWidth + 1 : baseWidth
+        ctx.lineWidth = toggled || active || coverageEnabled ? baseWidth + 1 : baseWidth
         if (wire.showFlow) {
           ctx.setLineDash([12, 10])
           ctx.lineDashOffset = -flowOffset
@@ -2069,6 +2297,137 @@
           laCtx.textAlign = 'left'
           laCtx.fillText(id, 6, yMid + 10)
         })
+      }
+
+      function computeWorldBounds() {
+        let minX = 0
+        let minY = 0
+        let maxX = 10
+        let maxY = 10
+        if (components.length) {
+          minX = Math.min(...components.map((c) => c.gx))
+          minY = Math.min(...components.map((c) => c.gy))
+          maxX = Math.max(...components.map((c) => c.gx + c.w))
+          maxY = Math.max(...components.map((c) => c.gy + c.h))
+        }
+        wires.forEach((w) => {
+          if (Array.isArray(w.path) && w.path.length) {
+            w.path.forEach((p) => {
+              minX = Math.min(minX, p.x)
+              minY = Math.min(minY, p.y)
+              maxX = Math.max(maxX, p.x)
+              maxY = Math.max(maxY, p.y)
+            })
+          }
+        })
+        return { minX, minY, maxX, maxY }
+      }
+
+      function drawMinimap() {
+        const width = minimapCanvas.clientWidth || 200
+        const height = minimapCanvas.clientHeight || 200
+        minimapCanvas.width = width
+        minimapCanvas.height = height
+        minimapCtx.fillStyle = '#0b0b0b'
+        minimapCtx.fillRect(0, 0, width, height)
+        minimapCtx.strokeStyle = '#222'
+        minimapCtx.strokeRect(0, 0, width, height)
+
+        const bounds = computeWorldBounds()
+        const spanX = Math.max(1, bounds.maxX - bounds.minX)
+        const spanY = Math.max(1, bounds.maxY - bounds.minY)
+        const pad = 2
+        const scale = Math.min(
+          (width - pad * 2) / spanX,
+          (height - pad * 2) / spanY
+        )
+
+        const toMini = (gx, gy) => ({
+          x: (gx - bounds.minX) * scale + pad,
+          y: (gy - bounds.minY) * scale + pad,
+        })
+
+        wires.forEach((w) => {
+          minimapCtx.strokeStyle = '#334155'
+          minimapCtx.lineWidth = 1
+          const pts =
+            Array.isArray(w.path) && w.path.length
+              ? w.path
+              : [
+                  { x: w.fromCompId ? (getPort(w.fromCompId, w.fromPortId)?.relativeX || 0) + (components.find((c) => c.id === w.fromCompId)?.gx || 0) : 0, y: w.fromCompId ? (getPort(w.fromCompId, w.fromPortId)?.relativeY || 0) + (components.find((c) => c.id === w.fromCompId)?.gy || 0) : 0 },
+                  { x: w.toCompId ? (getPort(w.toCompId, w.toPortId)?.relativeX || 0) + (components.find((c) => c.id === w.toCompId)?.gx || 0) : 0, y: w.toCompId ? (getPort(w.toCompId, w.toPortId)?.relativeY || 0) + (components.find((c) => c.id === w.toCompId)?.gy || 0) : 0 },
+                ]
+          minimapCtx.beginPath()
+          const first = toMini(pts[0].x, pts[0].y)
+          minimapCtx.moveTo(first.x, first.y)
+          pts.forEach((p) => {
+            const pt = toMini(p.x, p.y)
+            minimapCtx.lineTo(pt.x, pt.y)
+          })
+          minimapCtx.stroke()
+        })
+
+        components.forEach((c) => {
+          const pos = toMini(c.gx, c.gy)
+          minimapCtx.fillStyle = '#1f2937'
+          minimapCtx.strokeStyle = '#475569'
+          minimapCtx.lineWidth = 1
+          minimapCtx.fillRect(pos.x, pos.y, c.w * scale, c.h * scale)
+          minimapCtx.strokeRect(pos.x, pos.y, c.w * scale, c.h * scale)
+        })
+
+        const viewW = (canvas.width / viewScale) / GRID_SIZE
+        const viewH = (canvas.height / viewScale) / GRID_SIZE
+        const viewX = -camera.x / GRID_SIZE
+        const viewY = -camera.y / GRID_SIZE
+        const tl = toMini(viewX, viewY)
+        minimapCtx.strokeStyle = '#22d3ee'
+        minimapCtx.lineWidth = 1.5
+        minimapCtx.strokeRect(tl.x, tl.y, viewW * scale, viewH * scale)
+      }
+
+      function minimapToWorld(event) {
+        const rect = minimapCanvas.getBoundingClientRect()
+        const bounds = computeWorldBounds()
+        const spanX = Math.max(1, bounds.maxX - bounds.minX)
+        const spanY = Math.max(1, bounds.maxY - bounds.minY)
+        const pad = 2
+        const scale = Math.min(
+          (minimapCanvas.clientWidth - pad * 2) / spanX,
+          (minimapCanvas.clientHeight - pad * 2) / spanY
+        )
+        const x = (event.clientX - rect.left - pad) / scale + bounds.minX
+        const y = (event.clientY - rect.top - pad) / scale + bounds.minY
+        return { gx: x, gy: y }
+      }
+
+      function centerCameraOnGrid(gx, gy) {
+        const worldX = gx * GRID_SIZE
+        const worldY = gy * GRID_SIZE
+        camera.x = canvas.width / (2 * viewScale) - worldX
+        camera.y = canvas.height / (2 * viewScale) - worldY
+      }
+
+      function handleMinimapNav(event) {
+        const target = minimapToWorld(event)
+        centerCameraOnGrid(target.gx, target.gy)
+      }
+
+      function zoomToSelection() {
+        const pool = selectedComponents.length ? selectedComponents : components
+        if (!pool.length) return
+        const minX = Math.min(...pool.map((c) => c.gx))
+        const minY = Math.min(...pool.map((c) => c.gy))
+        const maxX = Math.max(...pool.map((c) => c.gx + c.w))
+        const maxY = Math.max(...pool.map((c) => c.gy + c.h))
+        const sizeX = Math.max(1, maxX - minX)
+        const sizeY = Math.max(1, maxY - minY)
+        const desired = Math.min(
+          canvas.width / (sizeX * GRID_SIZE * 1.2),
+          canvas.height / (sizeY * GRID_SIZE * 1.2)
+        )
+        setZoom(desired)
+        centerCameraOnGrid(minX + sizeX / 2, minY + sizeY / 2)
       }
 
       function drawPort(comp, port) {
@@ -2231,8 +2590,11 @@
       }
 
       function render() {
+        ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0)
+        const sceneWidth = canvas.width / viewScale
+        const sceneHeight = canvas.height / viewScale
         ctx.fillStyle = '#0f0f0f'
-        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.fillRect(0, 0, sceneWidth, sceneHeight)
         flowOffset = (flowOffset + 2) % 1000
         drawGrid()
         drawWires()
@@ -2252,6 +2614,7 @@
           ctx.fillRect(sx, sy, ex - sx, ey - sy)
         }
         requestAnimationFrame(render)
+        drawMinimap()
       }
 
       function refreshHUD() {
@@ -2277,6 +2640,12 @@
         verilogBtn.innerText = 'Export Verilog'
         verilogBtn.onclick = () => downloadVerilog()
         hud.appendChild(verilogBtn)
+
+        const spotlightBtn = document.createElement('button')
+        spotlightBtn.className = 'action'
+        spotlightBtn.innerText = 'Spotlight (Ctrl+K)'
+        spotlightBtn.onclick = () => openSpotlight()
+        hud.appendChild(spotlightBtn)
 
         const pauseBtn = document.createElement('button')
         pauseBtn.className = 'action'
@@ -2395,6 +2764,36 @@
         speedWrap.appendChild(speedInput)
         hud.appendChild(speedWrap)
 
+        const zoomWrap = document.createElement('div')
+        zoomWrap.style.display = 'flex'
+        zoomWrap.style.flexDirection = 'column'
+        zoomWrap.style.gap = '4px'
+        const zoomLabel = document.createElement('span')
+        zoomLabel.style.fontSize = '11px'
+        zoomLabel.style.color = '#aaa'
+        zoomLabel.innerText = `Zoom: ${(viewScale * 100).toFixed(0)}%`
+        const zoomInput = document.createElement('input')
+        zoomInput.type = 'range'
+        zoomInput.className = 'themed-input'
+        zoomInput.min = `${MIN_ZOOM * 100}`
+        zoomInput.max = `${MAX_ZOOM * 100}`
+        zoomInput.value = `${viewScale * 100}`
+        zoomInput.oninput = (e) => {
+          setZoom(Number(e.target.value) / 100)
+          zoomLabel.innerText = `Zoom: ${(viewScale * 100).toFixed(0)}%`
+        }
+        const zoomFit = document.createElement('button')
+        zoomFit.className = 'action'
+        zoomFit.innerText = 'Zoom to Selection'
+        zoomFit.onclick = () => {
+          zoomToSelection()
+          zoomLabel.innerText = `Zoom: ${(viewScale * 100).toFixed(0)}%`
+        }
+        zoomWrap.appendChild(zoomLabel)
+        zoomWrap.appendChild(zoomInput)
+        zoomWrap.appendChild(zoomFit)
+        hud.appendChild(zoomWrap)
+
         const laBtn = document.createElement('button')
         laBtn.className = logicAnalyzer.enabled ? 'action active' : 'action'
         laBtn.innerText = 'Logic Analyzer'
@@ -2454,6 +2853,53 @@
           })
           hud.appendChild(drcList)
         }
+
+        const covLabel = document.createElement('div')
+        covLabel.style.fontSize = '11px'
+        covLabel.style.color = '#cbd5f5'
+        covLabel.textContent = 'Coverage Heatmap'
+        hud.appendChild(covLabel)
+
+        const covBtn = document.createElement('button')
+        covBtn.className = coverageEnabled ? 'action active' : 'action'
+        covBtn.innerText = coverageEnabled ? 'Coverage On' : 'Coverage Off'
+        covBtn.onclick = () => {
+          setCoverageEnabled(!coverageEnabled)
+          refreshHUD()
+        }
+        hud.appendChild(covBtn)
+
+        const covLegend = document.createElement('div')
+        covLegend.style.display = 'flex'
+        covLegend.style.gap = '8px'
+        covLegend.style.fontSize = '10px'
+        covLegend.style.color = '#94a3b8'
+        ;[
+          ['#4b5563', 'Never'],
+          ['#22c55e', 'Active'],
+          ['#ef4444', 'Hot'],
+        ].forEach(([color, label]) => {
+          const row = document.createElement('span')
+          row.style.display = 'flex'
+          row.style.alignItems = 'center'
+          row.style.gap = '4px'
+          const sw = document.createElement('span')
+          sw.className = 'swatch'
+          sw.style.backgroundColor = color
+          row.appendChild(sw)
+          row.appendChild(document.createTextNode(label))
+          covLegend.appendChild(row)
+        })
+        hud.appendChild(covLegend)
+
+        const covClear = document.createElement('button')
+        covClear.className = 'action'
+        covClear.innerText = 'Clear Coverage'
+        covClear.onclick = () => {
+          clearCoverage()
+          refreshHUD()
+        }
+        hud.appendChild(covClear)
 
         const bundleLabel = document.createElement('div')
         bundleLabel.style.fontSize = '11px'
@@ -2642,6 +3088,12 @@
           refreshHUD()
         }
         hud.appendChild(selectBtn)
+
+        const shortcutBtn = document.createElement('button')
+        shortcutBtn.className = 'action'
+        shortcutBtn.innerText = 'Shortcut Mapper'
+        shortcutBtn.onclick = () => openShortcutModal()
+        hud.appendChild(shortcutBtn)
 
         const saveCustomBtn = document.createElement('button')
         saveCustomBtn.className = 'action'
@@ -3589,6 +4041,7 @@
         selectedComponents = []
         resetSimulationClock()
         drcFindings = []
+        clearCoverage()
         setMainContext(components, wires)
         seedInitialEvents()
         if (!historyMuted) pushHistoryState('clear')
@@ -3832,6 +4285,58 @@
         }
       }
 
+      function rotateComponent(comp) {
+        const oldW = comp.w
+        const oldH = comp.h
+        const center = { x: comp.gx + oldW / 2, y: comp.gy + oldH / 2 }
+        comp.inputs.forEach((p) => {
+          const dx = p.relativeX - oldW / 2
+          const dy = p.relativeY - oldH / 2
+          p.relativeX = oldH / 2 - dy
+          p.relativeY = oldW / 2 + dx
+        })
+        comp.outputs.forEach((p) => {
+          const dx = p.relativeX - oldW / 2
+          const dy = p.relativeY - oldH / 2
+          p.relativeX = oldH / 2 - dy
+          p.relativeY = oldW / 2 + dx
+        })
+        comp.w = oldH
+        comp.h = oldW
+        comp.gx = Math.round(center.x - comp.w / 2)
+        comp.gy = Math.round(center.y - comp.h / 2)
+      }
+
+      function rotateSelection() {
+        if (!selectedComponents.length) return
+        selectedComponents.forEach((comp) => {
+          rotateComponent(comp)
+          rerouteForComponent(comp)
+        })
+        pushHistoryState('rotate')
+      }
+
+      function removeSelection() {
+        if (selectedComponents.length) {
+          selectedComponents.slice().forEach((c) => removeComponent(c))
+          selectedComponents = []
+        }
+      }
+
+      function toggleSelectionState() {
+        const pool = selectedComponents.length
+          ? selectedComponents
+          : hoverPort
+            ? [hoverPort.component]
+            : []
+        pool.forEach((c) => {
+          if (c.type === 'INPUT') {
+            c.state = !c.state
+            queueComponent(c, 0)
+          }
+        })
+      }
+
       function hideContextMenu() {
         ctxMenu.classList.add('hidden')
         ctxMenu.innerHTML = ''
@@ -3881,7 +4386,20 @@
         }
       })
 
+      minimapCanvas.addEventListener('pointerdown', (e) => {
+        minimapDragging = true
+        handleMinimapNav(e)
+        e.preventDefault()
+      })
+      minimapCanvas.addEventListener('pointermove', (e) => {
+        if (minimapDragging) {
+          handleMinimapNav(e)
+        }
+      })
+
       function hitTestWire(clientX, clientY) {
+        const sceneX = clientX / viewScale
+        const sceneY = clientY / viewScale
         const tolerance = 8
         for (const w of wires) {
           const fromComp = components.find((c) => c.id === w.fromCompId)
@@ -3902,11 +4420,11 @@
           if (len2 === 0) continue
           const t = Math.max(
             0,
-            Math.min(1, ((clientX - a.x) * dx + (clientY - a.y) * dy) / len2)
+            Math.min(1, ((sceneX - a.x) * dx + (sceneY - a.y) * dy) / len2)
           )
           const px = a.x + t * dx
           const py = a.y + t * dy
-          const dist = Math.hypot(clientX - px, clientY - py)
+          const dist = Math.hypot(sceneX - px, sceneY - py)
           if (dist <= tolerance) return w
         }
         return null
@@ -3962,6 +4480,181 @@
         applyLoadBtn.addEventListener('click', handleLoad)
       }
 
+      function buildSpotlightItems() {
+        const items = []
+        Object.keys(TOOLS).forEach((type) => {
+          items.push({
+            id: `create-${type}`,
+            label: `Create ${type}`,
+            action: () => {
+              const centerGrid = {
+                x: Math.round((canvas.width / (2 * viewScale) - camera.x) / GRID_SIZE),
+                y: Math.round((canvas.height / (2 * viewScale) - camera.y) / GRID_SIZE),
+              }
+              placeFromPalette(centerGrid.x, centerGrid.y, type)
+              refreshHUD()
+            },
+          })
+        })
+        Object.keys(customLibrary).forEach((type) => {
+          items.push({
+            id: `create-${type}`,
+            label: `Create ${type}`,
+            action: () => {
+              const centerGrid = {
+                x: Math.round((canvas.width / (2 * viewScale) - camera.x) / GRID_SIZE),
+                y: Math.round((canvas.height / (2 * viewScale) - camera.y) / GRID_SIZE),
+              }
+              placeFromPalette(centerGrid.x, centerGrid.y, type)
+              refreshHUD()
+            },
+          })
+        })
+        components.forEach((c) => {
+          items.push({
+            id: c.id,
+            label: `Jump to ${c.type} (${c.id})`,
+            action: () => centerCameraOnGrid(c.gx + c.w / 2, c.gy + c.h / 2),
+          })
+        })
+        items.push({
+          id: 'clear',
+          label: 'Clear board',
+          action: () => {
+            clearAllState()
+            refreshHUD()
+          },
+        })
+        return items
+      }
+
+      function renderSpotlightResults(query = '') {
+        spotlightResults.innerHTML = ''
+        const q = query.toLowerCase()
+        const results = buildSpotlightItems()
+          .filter((item) => item.label.toLowerCase().includes(q))
+          .slice(0, 12)
+        results.forEach((item) => {
+          const btn = document.createElement('button')
+          btn.innerText = item.label
+          btn.onclick = () => {
+            item.action()
+            closeSpotlight()
+          }
+          spotlightResults.appendChild(btn)
+        })
+        if (!results.length) {
+          const empty = document.createElement('div')
+          empty.style.color = '#94a3b8'
+          empty.style.fontSize = '12px'
+          empty.innerText = 'No matches'
+          spotlightResults.appendChild(empty)
+        }
+      }
+
+      function openSpotlight() {
+        spotlightOpen = true
+        spotlightBackdrop.classList.remove('hidden')
+        spotlightInput.value = ''
+        renderSpotlightResults('')
+        spotlightInput.focus()
+      }
+
+      function closeSpotlight() {
+        spotlightOpen = false
+        spotlightBackdrop.classList.add('hidden')
+      }
+
+      spotlightInput.addEventListener('input', (e) => {
+        renderSpotlightResults(e.target.value || '')
+      })
+
+      spotlightInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          closeSpotlight()
+          return
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          const first = spotlightResults.querySelector('button')
+          if (first) first.click()
+        }
+      })
+
+      spotlightBackdrop.addEventListener('pointerdown', (e) => {
+        if (e.target === spotlightBackdrop) {
+          closeSpotlight()
+        }
+      })
+
+      function openShortcutModal() {
+        shortcutBuffer = { ...shortcutMap }
+        renderShortcutModal()
+        shortcutBackdrop.classList.remove('hidden')
+      }
+
+      function closeShortcutModal() {
+        persistShortcuts(shortcutBuffer)
+        shortcutBackdrop.classList.add('hidden')
+      }
+
+      function renderShortcutModal() {
+        shortcutList.innerHTML = ''
+        Object.keys(DEFAULT_SHORTCUTS).forEach((action) => {
+          const row = document.createElement('div')
+          row.className = 'shortcut-row'
+          const label = document.createElement('span')
+          label.textContent = action.toUpperCase()
+          label.style.width = '110px'
+          const input = document.createElement('input')
+          input.className = 'themed-input'
+          input.value = shortcutBuffer[action] || ''
+          input.onchange = (e) => {
+            shortcutBuffer[action] = normalizeKeyBinding(e.target.value)
+          }
+          row.appendChild(label)
+          row.appendChild(input)
+          shortcutList.appendChild(row)
+        })
+      }
+
+      shortcutClose.addEventListener('click', closeShortcutModal)
+      shortcutBackdrop.addEventListener('pointerdown', (e) => {
+        if (e.target === shortcutBackdrop) {
+          closeShortcutModal()
+        }
+      })
+
+      shortcutExport.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(shortcutMap, null, 2))
+        } catch (err) {
+          alert('Copy failed')
+        }
+      })
+
+      shortcutImport.addEventListener('click', () => {
+        const next = prompt('Paste shortcuts JSON', JSON.stringify(shortcutMap, null, 2))
+        if (!next) return
+        try {
+          const parsed = JSON.parse(next)
+          persistShortcuts(parsed)
+          renderShortcutModal()
+        } catch (err) {
+          alert('Invalid JSON')
+        }
+      })
+
+      shortcutReset.addEventListener('click', () => {
+        persistShortcuts(DEFAULT_SHORTCUTS)
+        renderShortcutModal()
+      })
+
+      shortcutList.addEventListener('change', () => {
+        persistShortcuts(shortcutBuffer)
+      })
+
       function handleDoubleClick(e) {
         const g = getGrid({ x: e.clientX, y: e.clientY })
         const compHit = componentAt(g.x, g.y)
@@ -3975,6 +4668,8 @@
       }
 
       canvas.addEventListener('pointerdown', (e) => {
+        const scenePos = clientToScene({ x: e.clientX, y: e.clientY })
+        lastPointerScene = scenePos
         const g = getGrid({ x: e.clientX, y: e.clientY })
         const portHit = hitTestPort(e.clientX, e.clientY)
         const wireHit = hitTestWire(e.clientX, e.clientY)
@@ -4008,8 +4703,8 @@
           if (compHit.type === 'INPUT' && e.button !== 2) {
             const posX = compHit.gx * GRID_SIZE + camera.x
             const posY = compHit.gy * GRID_SIZE + camera.y
-            const relX = e.clientX - posX
-            const relY = e.clientY - posY
+            const relX = scenePos.x - posX
+            const relY = scenePos.y - posY
             const pad = 8
             const w = compHit.w * GRID_SIZE
             const h = compHit.h * GRID_SIZE
@@ -4034,21 +4729,26 @@
         }
 
         mode = 'PANNING'
-        dragStart = { x: e.clientX - camera.x, y: e.clientY - camera.y }
+        dragStart = { x: scenePos.x - camera.x, y: scenePos.y - camera.y }
       })
 
       window.addEventListener('pointermove', (e) => {
+        const scenePos = clientToScene({ x: e.clientX, y: e.clientY })
+        lastPointerScene = scenePos
         mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
         hoverPort = hitTestPort(e.clientX, e.clientY)
         if (mode === 'SELECTING' && selectionStart) {
           selectionEnd = mouseGrid
         }
         if (mode === 'PANNING') {
-          camera.x = e.clientX - dragStart.x
-          camera.y = e.clientY - dragStart.y
+          camera.x = scenePos.x - dragStart.x
+          camera.y = scenePos.y - dragStart.y
         } else if (mode === 'DRAGGING_EXISTING' && draggingComp) {
           draggingComp.gx = mouseGrid.x - dragOffset.x
           draggingComp.gy = mouseGrid.y - dragOffset.y
+        }
+        if (minimapDragging) {
+          handleMinimapNav(e)
         }
       })
 
@@ -4058,6 +4758,7 @@
           draggingFromMenu = false
           placingType = null
         }
+        minimapDragging = false
 
         if (mode === 'SELECTING' && selectionStart) {
           const sx = Math.min(selectionStart.x, selectionEnd?.x ?? selectionStart.x)
@@ -4192,6 +4893,34 @@
 
       canvas.addEventListener('dblclick', handleDoubleClick)
       window.addEventListener('contextmenu', (e) => e.preventDefault())
+
+      function handleShortcutAction(action) {
+        switch (action) {
+          case 'wire': {
+            if (hoverPort) {
+              draggingWireStart = hoverPort
+              mode = 'CONNECTING'
+            }
+            break
+          }
+          case 'rotate':
+            rotateSelection()
+            break
+          case 'remove':
+            removeSelection()
+            break
+          case 'toggle':
+            toggleSelectionState()
+            break
+          case 'select':
+            mode = mode === 'SELECTING' ? 'IDLE' : 'SELECTING'
+            refreshHUD()
+            break
+          default:
+            break
+        }
+      }
+
       window.addEventListener('keydown', (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
           e.preventDefault()
@@ -4200,6 +4929,22 @@
           } else {
             undoEdit()
           }
+          return
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+          e.preventDefault()
+          if (spotlightOpen) closeSpotlight()
+          else openSpotlight()
+          return
+        }
+        if (spotlightOpen) return
+        if (!shortcutBackdrop.classList.contains('hidden')) return
+        const tag = (e.target?.tagName || '').toLowerCase()
+        if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return
+        const action = findShortcutAction(e.key)
+        if (action) {
+          e.preventDefault()
+          handleShortcutAction(action)
         }
       })
       window.addEventListener('resize', () => {
@@ -4217,6 +4962,15 @@
         load: apiLoad,
         tick: (count = 1) => stepSimulation(count),
         isPaused: () => isPaused,
+        getViewState: () => getViewState(),
+        setZoom: (z) => {
+          setZoom(z)
+          return getViewState()
+        },
+        zoomToSelection: () => {
+          zoomToSelection()
+          return getViewState()
+        },
         readComponent: (id) => {
           const comp = components.find((c) => c.id === id)
           if (!comp) return null
@@ -4271,6 +5025,16 @@
           })
           return Array.from(nets.entries()).map(([name, ids]) => ({ name, wires: ids }))
         },
+        enableCoverage: (enable = true) => {
+          setCoverageEnabled(enable)
+          return coverageEnabled
+        },
+        clearCoverage: () => {
+          clearCoverage()
+          return true
+        },
+        getCoverageStats: () =>
+          Array.from(coverageStats.entries()).map(([id, count]) => ({ id, count })),
         bundleWire: (wireId, name, width) => addWireToBundle(wireId, name, width),
         unbundleWire: (wireId) => removeWireFromBundle(wireId),
         listBundles: () => listBundles(),
@@ -4368,6 +5132,21 @@
         synthesizeFSM: (def) => synthesizeFSM(def),
         enterCustomEdit: (name) => enterCustomEdit(name),
         exitCustomEdit: () => exitCustomEdit(),
+        openSpotlight: () => {
+          openSpotlight()
+          return true
+        },
+        setShortcuts: (map) => {
+          persistShortcuts(map || {})
+          shortcutBuffer = { ...shortcutMap }
+          return { ...shortcutMap }
+        },
+        getShortcuts: () => ({ ...shortcutMap }),
+        selectComponents: (ids = []) => {
+          selectedComponents = components.filter((c) => ids.includes(c.id))
+          return selectedComponents.length
+        },
+        getCamera: () => ({ ...camera }),
       }
 
       function init() {

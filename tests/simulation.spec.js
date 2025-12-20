@@ -786,4 +786,66 @@ test.describe('Discrete tick simulation', () => {
     expect(info.wire.bundle).toBe('DATA')
     expect(info.out).toBe('aa')
   })
+
+  test('spotlight palette creates component', async ({ page }) => {
+    await gotoApp(page)
+    const before = await page.evaluate(() => components.length)
+    await page.keyboard.press('Control+KeyK')
+    await page.keyboard.type('INPUT')
+    await page.keyboard.press('Enter')
+    await page.waitForTimeout(50)
+    const after = await page.evaluate(
+      () => components.filter((c) => c.type === 'INPUT').length
+    )
+    expect(after).toBeGreaterThan(before)
+  })
+
+  test('coverage heatmap tracks toggles', async ({ page }) => {
+    await gotoApp(page)
+    await loadFixture(page, 'not_loop')
+    await page.evaluate(() => window.CircuitAPI.enableCoverage(true))
+    await page.evaluate(() => window.CircuitAPI.tick(3))
+    await page.waitForTimeout(50)
+    const stats = await page.evaluate(() => window.CircuitAPI.getCoverageStats())
+    expect(stats.some((s) => s.count > 0)).toBeTruthy()
+    await page.evaluate(() => window.CircuitAPI.clearCoverage())
+    const cleared = await page.evaluate(() => window.CircuitAPI.getCoverageStats())
+    expect(cleared.every((s) => s.count === 0)).toBeTruthy()
+  })
+
+  test('minimap zooms to selection', async ({ page }) => {
+    await gotoApp(page)
+    const data = await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const a = new Component(2, 2, 'INPUT')
+      const b = new Component(25, 10, 'OUTPUT')
+      components.push(a, b)
+      window.CircuitAPI.selectComponents([a.id, b.id])
+      const before = window.CircuitAPI.getViewState()
+      window.CircuitAPI.zoomToSelection()
+      const after = window.CircuitAPI.getViewState()
+      return { before, after }
+    })
+    expect(data.after.zoom).not.toBe(data.before.zoom)
+    expect(data.after.camera.x).not.toBe(data.before.camera.x)
+  })
+
+  test('shortcut mapper rebinds toggle action', async ({ page }) => {
+    await gotoApp(page)
+    const ids = await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const inp = new Component(1, 1, 'INPUT')
+      components.push(inp)
+      window.CircuitAPI.selectComponents([inp.id])
+      window.CircuitAPI.setShortcuts({ toggle: 't' })
+      return { id: inp.id }
+    })
+    await page.keyboard.press('t')
+    await page.waitForTimeout(30)
+    const state = await page.evaluate(
+      (id) => window.CircuitAPI.readComponent(id).state,
+      ids.id
+    )
+    expect(state).toBe(true)
+  })
 })
