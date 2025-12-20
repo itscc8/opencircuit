@@ -1,7 +1,5 @@
 ## OpenCircuit Roadmap (remaining items)
 
-The following items are pending implementation beyond the current PR (which covers 1–5):
-
 6. **Memory Primitives (RAM/ROM)**
    - Backed by `Uint8Array`, support load/save, and a popup Hex Editor for viewing/editing contents.
    - ROM load from file/assembler output; RAM runtime edits reflected in simulation.
@@ -64,7 +62,3 @@ The following items are pending implementation beyond the current PR (which cove
 21. **Keyboard Shortcut Mapper**
     - Settings UI to rebind defaults (W: Wire, R: Rotate, Del: Remove, Space: Toggle, S: Select, etc.).
     - Persist to storage; export/import mappings.
-
-22. **Miscellaneous Integration**
-    - Ensure all above features integrate with serialization, probes, logic analyzer, Verilog export, and DRC.
-
