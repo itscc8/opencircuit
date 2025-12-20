@@ -1,17 +1,5 @@
 ## OpenCircuit Roadmap (remaining items)
 
-11. **Integrated Testbench Sequencer**
-    - UI panel to script time-based input stimuli and expected outputs.
-    - Run/stop, report pass/fail with diff; import/export sequences.
-
-12. **Undo / Redo History Stack**
-    - Command pattern covering place/move/delete/wire/connect/props edits.
-    - Bounded history with hotkeys; serialization of history optional.
-
-13. **Sub-Circuit “Dive-In” Editing**
-    - Double-click custom component to enter its schematic, edit internals, and propagate changes to all instances.
-    - Breadcrumb/back navigation; isolation of coordinates.
-
 14. **Conditional Breakpoints**
     - User-defined expressions (e.g., `PC==0xA0`) evaluated each tick; pause when true.
     - UI list to enable/disable; highlight when hit.

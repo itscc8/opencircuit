@@ -442,4 +442,177 @@ test.describe('Discrete tick simulation', () => {
     expect(pathInfo.isGrid).toBe(true)
     expect(pathInfo.len).toBeGreaterThanOrEqual(3)
   })
+
+  test('testbench sequencer runs scripted stimuli', async ({ page }) => {
+    await gotoApp(page)
+    const result = await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const inp = new Component(1, 1, 'INPUT')
+      inp.id = 'in1'
+      const not = new Component(3, 1, 'NOT')
+      not.id = 'inv1'
+      const out = new Component(5, 1, 'OUTPUT')
+      out.id = 'out1'
+      components.push(inp, not, out)
+      wires.push(
+        new Wire({
+          fromCompId: inp.id,
+          fromPortId: 'out',
+          toCompId: not.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+      wires.push(
+        new Wire({
+          fromCompId: not.id,
+          fromPortId: 'out',
+          toCompId: out.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+      const seq = [
+        { at: 0, set: { in1: 0 }, expect: { out1: 1 } },
+        { at: 1, set: { in1: 1 }, expect: { out1: 0 } },
+      ]
+      window.CircuitAPI.setTestbench(seq)
+      return window.CircuitAPI.runTestbench()
+    })
+
+    expect(result.passed).toBe(true)
+    expect(result.failures?.length ?? 0).toBe(0)
+  })
+
+  test('undo/redo restores component placement', async ({ page }) => {
+    await gotoApp(page)
+    const positions = await page.evaluate(() => {
+      const project = {
+        format: 'OpenCircuit',
+        main: {
+          components: [
+            { id: 'a', type: 'INPUT', pos: { x: 1, y: 1 } },
+            { id: 'b', type: 'OUTPUT', pos: { x: 4, y: 1 } },
+          ],
+          wires: [
+            {
+              from: { comp: 'a', port: 'out' },
+              to: { comp: 'b', port: 'in' },
+              bitWidth: 1,
+            },
+          ],
+        },
+        library: [],
+      }
+      window.CircuitAPI.load(project)
+      const beforeComp = components.find((c) => c.id === 'a')
+      const before = { gx: beforeComp?.gx, gy: beforeComp?.gy }
+      window.CircuitAPI.moveComponent('a', 3, 4)
+      const movedComp = components.find((c) => c.id === 'a')
+      const moved = { gx: movedComp?.gx, gy: movedComp?.gy }
+      window.CircuitAPI.undo()
+      const afterUndo = {
+        gx: components.find((c) => c.id === 'a')?.gx,
+        gy: components.find((c) => c.id === 'a')?.gy,
+      }
+      window.CircuitAPI.redo()
+      const afterRedo = {
+        gx: components.find((c) => c.id === 'a')?.gx,
+        gy: components.find((c) => c.id === 'a')?.gy,
+      }
+      return { before, moved, afterUndo, afterRedo }
+    })
+
+    expect(positions.afterUndo).toEqual(positions.before)
+    expect(positions.afterRedo).toEqual(positions.moved)
+  })
+
+  test('sub-circuit dive-in edits propagate to instances', async ({ page }) => {
+    await gotoApp(page)
+    const values = await page.evaluate(() => {
+      window.CircuitAPI.reset()
+      const def = {
+        name: 'MYBUF',
+        components: [
+          { id: 'i', type: 'INPUT', gx: 0, gy: 0, properties: { bitWidth: 1 } },
+          { id: 'o', type: 'OUTPUT', gx: 2, gy: 0, properties: { bitWidth: 1 } },
+        ],
+        wires: [
+          {
+            fromCompId: 'i',
+            toCompId: 'o',
+            fromPortId: 'out',
+            toPortId: 'in',
+            bitWidth: 1,
+          },
+        ],
+        inputs: [{ componentId: 'i', bitWidth: 1 }],
+        outputs: [{ componentId: 'o', bitWidth: 1 }],
+      }
+      window.CircuitAPI.registerCustomTool(def)
+      const inp = new Component(1, 1, 'INPUT')
+      inp.id = 'top_in'
+      const custom = new Component(3, 1, 'MYBUF')
+      custom.id = 'inst1'
+      const out = new Component(6, 1, 'OUTPUT')
+      out.id = 'top_out'
+      components.push(inp, custom, out)
+      wires.push(
+        new Wire({
+          fromCompId: inp.id,
+          fromPortId: 'out',
+          toCompId: custom.id,
+          toPortId: 'in0',
+          bitWidth: 1,
+        })
+      )
+      wires.push(
+        new Wire({
+          fromCompId: custom.id,
+          fromPortId: 'out0',
+          toCompId: out.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+      window.CircuitAPI.setInput('top_in', 1)
+      window.CircuitAPI.tick(2)
+      const before = window.CircuitAPI.readComponent('top_out')?.inputs?.[0]?.value?.toString()
+
+      window.CircuitAPI.enterCustomEdit('MYBUF')
+      // Replace pass-through with inverter
+      const inputComp = components.find((c) => c.id === 'i')
+      const outputComp = components.find((c) => c.id === 'o')
+      wires.length = 0
+      const notGate = new Component(1, 1, 'NOT')
+      notGate.id = 'n1'
+      components.push(notGate)
+      wires.push(
+        new Wire({
+          fromCompId: inputComp.id,
+          fromPortId: 'out',
+          toCompId: notGate.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+      wires.push(
+        new Wire({
+          fromCompId: notGate.id,
+          fromPortId: 'out',
+          toCompId: outputComp.id,
+          toPortId: 'in',
+          bitWidth: 1,
+        })
+      )
+      window.CircuitAPI.exitCustomEdit()
+      window.CircuitAPI.setInput('top_in', 1)
+      window.CircuitAPI.tick(2)
+      const after = window.CircuitAPI.readComponent('top_out')?.inputs?.[0]?.value?.toString()
+      return { before, after }
+    })
+
+    expect(values.before).toBe('1')
+    expect(values.after).toBe('0')
+  })
 })

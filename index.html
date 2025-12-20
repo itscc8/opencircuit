@@ -375,6 +375,14 @@
 
       let components = []
       let wires = []
+      const mainContext = {
+        name: 'main',
+        type: 'main',
+        componentsRef: null,
+        wiresRef: null,
+      }
+      let contextStack = []
+      let currentContext = mainContext
       let camera = { x: 0, y: 0 }
       let mode = 'IDLE'
       let placingType = null
@@ -401,6 +409,19 @@
         cursor: null,
         maxSamples: 256,
       }
+      const HISTORY_LIMIT = 50
+      let historyStack = []
+      let historyIndex = -1
+      let historyMuted = false
+      const testbench = {
+        script: '[]',
+        running: false,
+        lastResult: null,
+        stopRequested: false,
+      }
+      mainContext.componentsRef = components
+      mainContext.wiresRef = wires
+      currentContext = mainContext
       const GATE_DELAYS = {
         INPUT: 0,
         OUTPUT: 0,
@@ -1270,6 +1291,7 @@
         )
         applyAutoRoute(wires[wires.length - 1])
         queueComponent(to.component, gateDelay(to.component.type))
+        pushHistoryState('connect')
       }
 
       function removeComponent(comp) {
@@ -1278,12 +1300,13 @@
           if (!keep) {
             probes.delete(w.id)
             const dest = components.find((c) => c.id === w.toCompId)
-            if (dest) queueComponent(dest, gateDelay(dest.type))
+          if (dest) queueComponent(dest, gateDelay(dest.type))
           }
           return keep
         })
         const idx = components.indexOf(comp)
         if (idx >= 0) components.splice(idx, 1)
+        pushHistoryState('remove')
       }
 
       function runTickFor(comps, wireList) {
@@ -1504,6 +1527,11 @@
           if (target) target.overrideValue = inputs[idx] ?? 0n
         })
         runTickFor(sub.components, sub.wires)
+        sub.wires.forEach((wire) => {
+          const dest = sub.components.find((c) => c.id === wire.toCompId)
+          const port = dest?.inputs.find((p) => p.id === wire.toPortId)
+          if (port) port.value = wire.value
+        })
         const outputs = def.outputs.map((p) => {
           const outComp = sub.components.find((c) => c.id === p.componentId)
           if (!outComp) return 0n
@@ -1558,6 +1586,117 @@
         isPaused = true
         tick(count)
         isPaused = prev
+      }
+
+      function normalizeTestbenchSequence(input) {
+        if (!input) return []
+        if (typeof input === 'string') {
+          const trimmed = input.trim()
+          if (!trimmed) return []
+          return JSON.parse(trimmed)
+        }
+        if (Array.isArray(input)) return input
+        return []
+      }
+
+      function applyInputValue(id, value) {
+        const comp = components.find((c) => c.id === id && c.type === 'INPUT')
+        if (!comp) return false
+        comp.state = Boolean(value)
+        if (value === null || value === undefined) {
+          comp.overrideValue = null
+        } else {
+          comp.overrideValue = BigInt(value)
+        }
+        scheduledComponents.delete(comp.id)
+        queueComponent(comp, 0)
+        return true
+      }
+
+      function readTestSignal(id) {
+        const comp = components.find((c) => c.id === id)
+        if (!comp) return null
+        if (comp.inputs.length) return comp.inputs[0].value ?? null
+        if (comp.outputs.length) return comp.outputs[0].value ?? null
+        return null
+      }
+
+      function runTestbench(sequence) {
+        const steps = normalizeTestbenchSequence(sequence ?? testbench.script)
+        testbench.stopRequested = false
+        testbench.running = true
+        const prevPaused = isPaused
+        pauseSimulation()
+        resetSimulationClock()
+        seedInitialEvents()
+        let maxTick = 0
+        steps.forEach((s) => {
+          if (typeof s?.at === 'number') maxTick = Math.max(maxTick, s.at)
+        })
+        const failures = []
+        for (let t = 0; t <= maxTick; t++) {
+          if (testbench.stopRequested) break
+          steps
+            .filter((s) => s.at === t && s.set)
+            .forEach((s) => {
+              Object.entries(s.set || {}).forEach(([id, val]) => {
+                applyInputValue(id, val)
+              })
+            })
+          scheduledComponents.clear()
+          eventQueue.length = 0
+          runTickFor(components, wires)
+          runTickFor(components, wires)
+          wires.forEach((wire) => {
+            const dest = components.find((c) => c.id === wire.toCompId)
+            const port = dest?.inputs.find((p) => p.id === wire.toPortId)
+            if (port) port.value = wire.value
+          })
+          simTime += 1
+          steps
+            .filter((s) => s.at === t && s.expect)
+            .forEach((s) => {
+              Object.entries(s.expect || {}).forEach(([id, val]) => {
+                const actual = readTestSignal(id)
+                const expected = val === null || val === undefined ? null : BigInt(val)
+                if (actual === null || actual === undefined) {
+                  failures.push({ tick: t, id, expected, actual: null })
+                } else if (expected !== null && BigInt(actual) !== expected) {
+                  failures.push({ tick: t, id, expected, actual })
+                }
+              })
+            })
+          if (testbench.stopRequested) break
+        }
+        testbench.running = false
+        const passed = !testbench.stopRequested && failures.length === 0
+        testbench.lastResult = {
+          passed,
+          failures,
+          ticks: maxTick + 1,
+          stopped: testbench.stopRequested,
+        }
+        if (!prevPaused) resumeSimulation()
+        return testbench.lastResult
+      }
+
+      function stopTestbench() {
+        testbench.stopRequested = true
+        testbench.running = false
+      }
+
+      function setTestbenchScript(seq) {
+        const parsed = normalizeTestbenchSequence(seq)
+        testbench.script = JSON.stringify(parsed, null, 2)
+        return parsed
+      }
+
+      function getTestbenchStatus() {
+        return {
+          running: testbench.running,
+          lastResult: testbench.lastResult,
+          script: testbench.script,
+        }
       }
 
       function getGrid(clientPos) {
@@ -1998,6 +2137,14 @@
       function refreshHUD() {
         hud.innerHTML = ''
 
+        if (currentContext.type === 'custom') {
+          const crumb = document.createElement('button')
+          crumb.className = 'action'
+          crumb.innerText = `Exit ${currentContext.name}`
+          crumb.onclick = exitCustomEdit
+          hud.appendChild(crumb)
+        }
+
         const modalBtn = document.createElement('button')
         modalBtn.className = 'action'
         modalBtn.innerText = 'Save / Load'
@@ -2023,6 +2170,20 @@
         stepBtn.disabled = !isPaused
         stepBtn.onclick = () => stepSimulation(1)
         hud.appendChild(stepBtn)
+
+        const undoBtn = document.createElement('button')
+        undoBtn.className = 'action'
+        undoBtn.innerText = 'Undo'
+        undoBtn.disabled = historyIndex <= 0
+        undoBtn.onclick = undoEdit
+        hud.appendChild(undoBtn)
+
+        const redoBtn = document.createElement('button')
+        redoBtn.className = 'action'
+        redoBtn.innerText = 'Redo'
+        redoBtn.disabled = historyIndex >= historyStack.length - 1
+        redoBtn.onclick = redoEdit
+        hud.appendChild(redoBtn)
 
         const speedWrap = document.createElement('div')
         speedWrap.style.display = 'flex'
@@ -2103,6 +2264,83 @@
           hud.appendChild(drcList)
         }
 
+        const tbLabel = document.createElement('div')
+        tbLabel.style.fontSize = '11px'
+        tbLabel.style.color = '#cbd5f5'
+        tbLabel.textContent = 'Testbench Sequencer'
+        hud.appendChild(tbLabel)
+
+        const tbArea = document.createElement('textarea')
+        tbArea.className = 'themed-input'
+        tbArea.style.height = '90px'
+        tbArea.value = testbench.script
+        tbArea.onchange = (e) => {
+          try {
+            const parsed = setTestbenchScript(e.target.value)
+            tbStatus.textContent = `Loaded ${parsed.length} steps`
+            tbArea.value = testbench.script
+          } catch (err) {
+            tbStatus.textContent = 'Invalid sequence'
+          }
+        }
+        hud.appendChild(tbArea)
+
+        const tbButtons = document.createElement('div')
+        tbButtons.style.display = 'flex'
+        tbButtons.style.gap = '6px'
+        tbButtons.style.flexWrap = 'wrap'
+
+        const tbRun = document.createElement('button')
+        tbRun.className = 'action'
+        tbRun.innerText = 'Run Sequence'
+        tbRun.onclick = () => {
+          try {
+            const parsed = setTestbenchScript(tbArea.value)
+            const res = runTestbench(parsed)
+            tbArea.value = testbench.script
+            tbStatus.textContent = res.passed
+              ? `PASS in ${res.ticks} ticks`
+              : `FAIL (${res.failures.length})`
+          } catch (err) {
+            tbStatus.textContent = 'Invalid sequence'
+          }
+        }
+        tbButtons.appendChild(tbRun)
+
+        const tbStop = document.createElement('button')
+        tbStop.className = 'action'
+        tbStop.innerText = 'Stop'
+        tbStop.onclick = () => {
+          stopTestbench()
+          tbStatus.textContent = 'Stopped'
+        }
+        tbButtons.appendChild(tbStop)
+
+        const tbCopy = document.createElement('button')
+        tbCopy.className = 'action'
+        tbCopy.innerText = 'Copy Sequence'
+        tbCopy.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(testbench.script)
+          } catch (err) {
+            console.warn('Copy failed', err)
+          }
+        }
+        tbButtons.appendChild(tbCopy)
+        hud.appendChild(tbButtons)
+
+        const tbStatus = document.createElement('div')
+        tbStatus.style.fontSize = '11px'
+        tbStatus.style.color = '#aaa'
+        if (testbench.lastResult) {
+          tbStatus.textContent = testbench.lastResult.passed
+            ? `PASS in ${testbench.lastResult.ticks} ticks`
+            : `FAIL (${testbench.lastResult.failures.length})`
+        } else {
+          tbStatus.textContent = 'Idle'
+        }
+        hud.appendChild(tbStatus)
+
         const selectBtn = document.createElement('button')
         selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
         selectBtn.innerText = '[ ] Select Area'
@@ -2180,44 +2418,82 @@
           hud.appendChild(clearBtn)
       }
 
-      function serializeProject() {
-        return JSON.stringify(
-          {
-            format: 'OpenCircuit',
-            version: '1.0',
-            library: Object.values(customLibrary).map((def) => ({
-              name: def.name,
-              components: def.components,
-              wires: def.wires,
-              inputs: def.inputs,
-              outputs: def.outputs,
-              parameters: def.parameters || {},
+      function buildProjectObject() {
+        const rootComps = mainContext.componentsRef || components
+        const rootWires = mainContext.wiresRef || wires
+        return {
+          format: 'OpenCircuit',
+          version: '1.0',
+          library: Object.values(customLibrary).map((def) => ({
+            name: def.name,
+            components: def.components,
+            wires: def.wires,
+            inputs: def.inputs,
+            outputs: def.outputs,
+            parameters: def.parameters || {},
+          })),
+          main: {
+            components: rootComps.map((c) => ({
+              id: c.id,
+              type: c.type,
+              pos: { x: c.gx, y: c.gy },
+              properties: c.properties,
+              memory:
+                c.type === 'RAM' || c.type === 'ROM'
+                  ? Array.from(ensureMemory(c) || [])
+                  : undefined,
             })),
-            main: {
-              components: components.map((c) => ({
-                id: c.id,
-                type: c.type,
-                pos: { x: c.gx, y: c.gy },
-                properties: c.properties,
-                memory:
-                  c.type === 'RAM' || c.type === 'ROM'
-                    ? Array.from(ensureMemory(c) || [])
-                    : undefined,
-              })),
-              wires: wires.map((w) => ({
-                from: { comp: w.fromCompId, port: w.fromPortId },
-                to: { comp: w.toCompId, port: w.toPortId },
-                bitWidth: w.bitWidth,
-                showFlow: !!w.showFlow,
-                netName: w.netName || undefined,
-                path: w.path || undefined,
-                pathIsGrid: w.pathIsGrid || undefined,
-              })),
-            },
+            wires: rootWires.map((w) => ({
+              from: { comp: w.fromCompId, port: w.fromPortId },
+              to: { comp: w.toCompId, port: w.toPortId },
+              bitWidth: w.bitWidth,
+              showFlow: !!w.showFlow,
+              netName: w.netName || undefined,
+              path: w.path || undefined,
+              pathIsGrid: w.pathIsGrid || undefined,
+            })),
           },
-          null,
-          2
-        )
+        }
+      }
+
+      function serializeProject() {
+        return JSON.stringify(buildProjectObject(), null, 2)
+      }
+
+      function pushHistoryState(label = 'edit') {
+        if (historyMuted) return
+        if (currentContext.type === 'custom') {
+          persistCurrentDefinition()
+        }
+        const snapshot = { label, data: buildProjectObject() }
+        if (historyIndex < historyStack.length - 1) {
+          historyStack = historyStack.slice(0, historyIndex + 1)
+        }
+        historyStack.push(snapshot)
+        if (historyStack.length > HISTORY_LIMIT) {
+          historyStack.shift()
+        }
+        historyIndex = historyStack.length - 1
+      }
+
+      function restoreHistoryState(index) {
+        if (index < 0 || index >= historyStack.length) return false
+        historyMuted = true
+        loadProject(historyStack[index].data)
+        historyMuted = false
+        historyIndex = index
+        refreshHUD()
+        return true
+      }
+
+      function undoEdit() {
+        if (historyIndex <= 0) return false
+        return restoreHistoryState(historyIndex - 1)
+      }
+
+      function redoEdit() {
+        if (historyIndex >= historyStack.length - 1) return false
+        return restoreHistoryState(historyIndex + 1)
       }
 
       function sanitizeId(name) {
@@ -2441,6 +2717,17 @@
         }
       }
 
+      function setMainContext(newComponents, newWires) {
+        components = newComponents
+        wires = newWires
+        mainContext.componentsRef = components
+        mainContext.wiresRef = wires
+        currentContext = mainContext
+        contextStack = []
+        camera = { x: 0, y: 0 }
+        selectedComponents = []
+      }
+
       function loadProject(data) {
         if (!data || data.format !== 'OpenCircuit') {
           throw new Error('Invalid format')
@@ -2510,8 +2797,10 @@
           if (!wireObj.path) applyAutoRoute(wireObj)
           wires.push(wireObj)
         })
+        setMainContext(components, wires)
         seedInitialEvents()
         processEventsUntil(simTime)
+        if (!historyMuted) pushHistoryState('load')
       }
 
       function openModal(tab = 'save') {
@@ -2531,7 +2820,9 @@
         selectedComponents = []
         resetSimulationClock()
         drcFindings = []
+        setMainContext(components, wires)
         seedInitialEvents()
+        if (!historyMuted) pushHistoryState('clear')
       }
 
       function saveCustomComponent() {
@@ -2589,7 +2880,162 @@
           })),
         }
         registerCustomTool(def)
+        pushHistoryState('custom-save')
         refreshHUD()
+      }
+
+      function buildEditableDef(def) {
+        const compMap = new Map()
+        const compList = (def.components || []).map((c) => {
+          const props = { ...(c.properties || {}) }
+          const inst = new Component(
+            c.gx ?? c.pos?.x ?? c.x ?? 0,
+            c.gy ?? c.pos?.y ?? c.y ?? 0,
+            c.type,
+            props
+          )
+          inst.id = c.id || inst.id
+          configureComponent(inst)
+          compMap.set(inst.id, inst)
+          return inst
+        })
+        const wireList = []
+        ;(def.wires || []).forEach((w) => {
+          const fromComp = compMap.get(w.fromCompId)
+          const toComp = compMap.get(w.toCompId)
+          if (!fromComp || !toComp) return
+          const fromPort = fromComp.outputs.find((p) => p.id === w.fromPortId)
+          const toPort = toComp.inputs.find((p) => p.id === w.toPortId)
+          if (!fromPort || !toPort) return
+          const wireObj = new Wire({
+            id: w.id,
+            fromCompId: fromComp.id,
+            fromPortId: fromPort.id,
+            toCompId: toComp.id,
+            toPortId: toPort.id,
+            bitWidth: w.bitWidth || fromPort.bitWidth,
+            netName: w.netName || null,
+            path: w.path || null,
+            pathIsGrid: !!w.pathIsGrid,
+          })
+          if (!wireObj.path) {
+            const start = {
+              x: fromComp.gx + fromPort.relativeX,
+              y: fromComp.gy + fromPort.relativeY,
+            }
+            const end = { x: toComp.gx + toPort.relativeX, y: toComp.gy + toPort.relativeY }
+            wireObj.path = [
+              { x: start.x, y: start.y },
+              { x: start.x, y: end.y },
+              { x: end.x, y: end.y },
+            ]
+            wireObj.pathIsGrid = true
+          }
+          wireList.push(wireObj)
+        })
+        return { components: compList, wires: wireList }
+      }
+
+      function persistCurrentDefinition() {
+        if (currentContext.type !== 'custom') return
+        const def = currentContext.def
+        if (!def) return
+        def.components = components.map((c) => ({
+          id: c.id,
+          type: c.type,
+          gx: c.gx,
+          gy: c.gy,
+          properties: { ...c.properties },
+        }))
+        def.wires = wires.map((w) => ({
+          id: w.id,
+          fromCompId: w.fromCompId,
+          toCompId: w.toCompId,
+          fromPortId: w.fromPortId,
+          toPortId: w.toPortId,
+          bitWidth: w.bitWidth,
+          netName: w.netName || null,
+          path: w.path || null,
+          pathIsGrid: w.pathIsGrid || false,
+        }))
+        const inputs = components
+          .filter((c) => c.type === 'INPUT')
+          .sort((a, b) => a.gy - b.gy || a.gx - b.gx)
+          .map((c) => ({
+            componentId: c.id,
+            bitWidth: c.properties.bitWidth || 1,
+          }))
+        const outputs = components
+          .filter((c) => c.type === 'OUTPUT')
+          .sort((a, b) => a.gy - b.gy || a.gx - b.gx)
+          .map((c) => ({
+            componentId: c.id,
+            bitWidth: c.properties.bitWidth || 1,
+          }))
+        def.inputs = inputs
+        def.outputs = outputs
+        ;(mainContext.componentsRef || []).forEach((inst) => {
+          if (inst.type === def.name) {
+            inst.subInstance = null
+            queueComponent(inst, 0)
+          }
+        })
+        registerCustomTool({
+          name: def.name,
+          components: def.components,
+          wires: def.wires,
+          inputs: def.inputs,
+          outputs: def.outputs,
+          parameters: def.parameters || {},
+        })
+        currentContext.def = customLibrary[def.name] || def
+      }
+
+      function enterCustomEdit(name) {
+        const def = customLibrary[name]
+        if (!def) return false
+        const editable = buildEditableDef(def)
+        contextStack.push({
+          name: currentContext.name,
+          type: currentContext.type,
+          def: currentContext.def,
+          componentsRef: components,
+          wiresRef: wires,
+        })
+        components = editable.components
+        wires = editable.wires
+        currentContext = {
+          name,
+          type: 'custom',
+          def,
+          componentsRef: components,
+          wiresRef: wires,
+        }
+        camera = { x: 0, y: 0 }
+        selectedComponents = []
+        seedInitialEvents()
+        refreshHUD()
+        return true
+      }
+
+      function exitCustomEdit() {
+        if (currentContext.type !== 'custom') return false
+        persistCurrentDefinition()
+        const prev = contextStack.pop() || mainContext
+        components = prev.componentsRef
+        wires = prev.wiresRef
+        currentContext = prev
+        seedInitialEvents()
+        runTickFor(components, wires)
+        runTickFor(components, wires)
+        wires.forEach((wire) => {
+          const dest = components.find((c) => c.id === wire.toCompId)
+          const port = dest?.inputs.find((p) => p.id === wire.toPortId)
+          if (port) port.value = wire.value
+        })
+        refreshHUD()
+        pushHistoryState('custom-edit')
+        return true
       }
 
       function placeCustom(name, gx, gy) {
@@ -2599,6 +3045,7 @@
         const comp = new Component(gx, gy, name)
         components.push(comp)
         queueComponent(comp, 0)
+        pushHistoryState('place')
       }
 
       function placeFromPalette(gx, gy, type) {
@@ -2610,6 +3057,7 @@
           const comp = new Component(gx, gy, type)
           components.push(comp)
           queueComponent(comp, 0)
+          pushHistoryState('place')
         }
       }
 
@@ -2744,7 +3192,15 @@
       }
 
       function handleDoubleClick(e) {
-        // double-tap editing disabled; use context menu instead
+        const g = getGrid({ x: e.clientX, y: e.clientY })
+        const compHit = componentAt(g.x, g.y)
+        if (compHit && customLibrary[compHit.type]) {
+          enterCustomEdit(compHit.type)
+          return
+        }
+        if (currentContext.type === 'custom') {
+          exitCustomEdit()
+        }
       }
 
       canvas.addEventListener('pointerdown', (e) => {
@@ -2858,6 +3314,9 @@
         }
 
         if (mode === 'DRAGGING_EXISTING' && draggingComp) {
+          const moved =
+            draggingComp.gx !== draggingComp.initialPos.gx ||
+            draggingComp.gy !== draggingComp.initialPos.gy
           if (
             checkCollision(
               draggingComp.gx,
@@ -2870,6 +3329,7 @@
             draggingComp.gy = draggingComp.initialPos.gy
           }
           rerouteForComponent(draggingComp)
+          if (moved) pushHistoryState('move')
         }
 
         mode = 'IDLE'
@@ -2891,6 +3351,7 @@
               wires = wires.filter((w) => w !== wireHit)
               const dest = components.find((c) => c.id === wireHit.toCompId)
               if (dest) queueComponent(dest, gateDelay(dest.type))
+              pushHistoryState('delete-wire')
             },
           })
           items.push({
@@ -2905,6 +3366,7 @@
               const next = prompt('Net name', wireHit.netName || '')
               if (next !== null) {
                 wireHit.netName = next.trim() || null
+                pushHistoryState('net-name')
               }
             },
           })
@@ -2921,6 +3383,7 @@
                 if (next !== null) {
                   compHit.properties.busSize = clampBits(next, 8)
                   configureComponent(compHit)
+                  pushHistoryState('prop-change')
                 }
               },
             })
@@ -2936,6 +3399,7 @@
                 if (next !== null) {
                   compHit.properties.bitWidth = clampBits(next, 1)
                   configureComponent(compHit)
+                  pushHistoryState('prop-change')
                 }
               },
             })
@@ -2957,6 +3421,16 @@
 
       canvas.addEventListener('dblclick', handleDoubleClick)
       window.addEventListener('contextmenu', (e) => e.preventDefault())
+      window.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+          e.preventDefault()
+          if (e.shiftKey) {
+            redoEdit()
+          } else {
+            undoEdit()
+          }
+        }
+      })
       window.addEventListener('resize', () => {
         canvas.width = window.innerWidth
         canvas.height = window.innerHeight
@@ -3068,6 +3542,30 @@
           openHexEditor(comp)
           return true
         },
+        setTestbench: (seq) => {
+          setTestbenchScript(seq)
+          return true
+        },
+        runTestbench: (seq) => runTestbench(seq),
+        stopTestbench: () => {
+          stopTestbench()
+          return true
+        },
+        getTestbenchStatus: () => getTestbenchStatus(),
+        undo: () => undoEdit(),
+        redo: () => redoEdit(),
+        moveComponent: (id, gx, gy) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return false
+          const prev = { gx: comp.gx, gy: comp.gy }
+          comp.gx = Math.floor(gx)
+          comp.gy = Math.floor(gy)
+          rerouteForComponent(comp)
+          if (prev.gx !== comp.gx || prev.gy !== comp.gy) pushHistoryState('move')
+          return true
+        },
+        enterCustomEdit: (name) => enterCustomEdit(name),
+        exitCustomEdit: () => exitCustomEdit(),
       }
 
       function init() {
@@ -3075,6 +3573,7 @@
         canvas.height = window.innerHeight
         refreshHUD()
         initModalEvents()
+        pushHistoryState('init')
         tickOnce()
         startTickLoop()
         render()
