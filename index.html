@@ -370,6 +370,8 @@
         parseInt(getComputedStyle(document.documentElement).getPropertyValue('--hud-offset')) ||
         200
       const MAX_DRC_DISPLAY_COUNT = 5
+      const BYTE_MASK = 0xff
+      const BYTE_MASK_BIG = 0xffn
 
       let components = []
       let wires = []
@@ -556,15 +558,15 @@
           .trim()
           .split(/\s+/)
           .filter(Boolean)
-          .map((v) => parseInt(v, 16) & 0xff)
+          .map((v) => parseInt(v, 16) & BYTE_MASK)
           .filter((n) => Number.isFinite(n))
       }
 
       function calculateMemoryAddress(input, memoryLength) {
         const len = Math.max(1, memoryLength || 1)
-        const raw = Number(toBig(input) ?? 0n)
+        const raw = Math.abs(Number(toBig(input) ?? 0n))
         if (!Number.isFinite(raw)) return 0
-        return ((raw % len) + len) % len
+        return raw % len
       }
 
       function openHexEditor(comp) {
@@ -1439,7 +1441,7 @@
             const clk = inputs[3] ?? 0n
             const rising = clk !== 0n && comp.lastClock === 0n
             if (rising && we !== 0n) {
-              mem[addr] = Number(dataIn & 0xffn)
+              mem[addr] = Number(dataIn & BYTE_MASK_BIG)
             }
             comp.lastClock = clk
             const byte = BigInt(mem[addr] || 0)
@@ -2474,7 +2476,7 @@
           )
           comp.id = c.id || comp.id
           if ((c.type === 'RAM' || c.type === 'ROM') && Array.isArray(c.memory)) {
-            comp.memory = new Uint8Array(c.memory.map((v) => Number(v) & 0xff))
+            comp.memory = new Uint8Array(c.memory.map((v) => Number(v) & BYTE_MASK))
           }
           configureComponent(comp)
           components.push(comp)
@@ -3042,7 +3044,11 @@
           const mem = ensureMemory(comp)
           if (Array.isArray(data) || data instanceof Uint8Array) {
             mem.fill(0)
-            mem.set(Array.from(data).map((v) => Number(v) & 0xff).slice(0, mem.length))
+            mem.set(
+              Array.from(data)
+                .map((v) => Number(v) & BYTE_MASK)
+                .slice(0, mem.length)
+            )
             queueComponent(comp, 0)
             return true
           }
