@@ -2350,12 +2350,26 @@
         wires.forEach((w) => {
           minimapCtx.strokeStyle = '#334155'
           minimapCtx.lineWidth = 1
+          const fromComp = components.find((c) => c.id === w.fromCompId)
+          const toComp = components.find((c) => c.id === w.toCompId)
+          const fromPort = getPort(w.fromCompId, w.fromPortId)
+          const toPort = getPort(w.toCompId, w.toPortId)
           const pts =
             Array.isArray(w.path) && w.path.length
               ? w.path
               : [
-                  { x: w.fromCompId ? (getPort(w.fromCompId, w.fromPortId)?.relativeX || 0) + (components.find((c) => c.id === w.fromCompId)?.gx || 0) : 0, y: w.fromCompId ? (getPort(w.fromCompId, w.fromPortId)?.relativeY || 0) + (components.find((c) => c.id === w.fromCompId)?.gy || 0) : 0 },
-                  { x: w.toCompId ? (getPort(w.toCompId, w.toPortId)?.relativeX || 0) + (components.find((c) => c.id === w.toCompId)?.gx || 0) : 0, y: w.toCompId ? (getPort(w.toCompId, w.toPortId)?.relativeY || 0) + (components.find((c) => c.id === w.toCompId)?.gy || 0) : 0 },
+                  {
+                    x: w.fromCompId
+                      ? (fromPort?.relativeX || 0) + (fromComp?.gx || 0)
+                      : 0,
+                    y: w.fromCompId
+                      ? (fromPort?.relativeY || 0) + (fromComp?.gy || 0)
+                      : 0,
+                  },
+                  {
+                    x: w.toCompId ? (toPort?.relativeX || 0) + (toComp?.gx || 0) : 0,
+                    y: w.toCompId ? (toPort?.relativeY || 0) + (toComp?.gy || 0) : 0,
+                  },
                 ]
           minimapCtx.beginPath()
           const first = toMini(pts[0].x, pts[0].y)
@@ -4701,14 +4715,21 @@
         const compHit = componentAt(g.x, g.y)
         if (compHit) {
           if (compHit.type === 'INPUT' && e.button !== 2) {
-            const posX = compHit.gx * GRID_SIZE + camera.x
-            const posY = compHit.gy * GRID_SIZE + camera.y
-            const relX = scenePos.x - posX
-            const relY = scenePos.y - posY
+            const compRect = {
+              x: compHit.gx * GRID_SIZE + camera.x,
+              y: compHit.gy * GRID_SIZE + camera.y,
+              w: compHit.w * GRID_SIZE,
+              h: compHit.h * GRID_SIZE,
+            }
+            const relX = scenePos.x - compRect.x
+            const relY = scenePos.y - compRect.y
             const pad = 8
-            const w = compHit.w * GRID_SIZE
-            const h = compHit.h * GRID_SIZE
-            if (relX > pad && relX < w - pad && relY > pad && relY < h - pad) {
+            if (
+              relX > pad &&
+              relX < compRect.w - pad &&
+              relY > pad &&
+              relY < compRect.h - pad
+            ) {
               compHit.state = !compHit.state
               queueComponent(compHit, 0)
               return
@@ -4940,7 +4961,13 @@
         if (spotlightOpen) return
         if (!shortcutBackdrop.classList.contains('hidden')) return
         const tag = (e.target?.tagName || '').toLowerCase()
-        if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return
+        if (
+          tag === 'input' ||
+          tag === 'textarea' ||
+          e.target?.isContentEditable ||
+          e.target?.contentEditable === 'true'
+        )
+          return
         const action = findShortcutAction(e.key)
         if (action) {
           e.preventDefault()
