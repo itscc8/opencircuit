@@ -142,4 +142,23 @@ test.describe('Discrete tick simulation', () => {
 
     expect(new Set(samples).size).toBeGreaterThan(1)
   })
+
+  test('dff toggles on rising clock edges', async ({ page }) => {
+    await gotoApp(page)
+    await loadFixture(page, 'dff_clock')
+
+    const values = await page.evaluate(() => {
+      const outId = 'out1'
+      const samples = []
+      for (let i = 0; i < 4; i++) {
+        samples.push(
+          window.CircuitAPI.readComponent(outId)?.inputs?.[0]?.value?.toString()
+        )
+        window.CircuitAPI.tick(1)
+      }
+      return samples
+    })
+
+    expect(new Set(values).size).toBeGreaterThan(1)
+  })
 })

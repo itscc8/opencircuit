@@ -1,0 +1,19 @@
+{
+  "format": "OpenCircuit",
+  "version": "1.0",
+  "library": [],
+  "main": {
+    "components": [
+      { "id": "clk", "type": "CLOCK", "pos": { "x": 1, "y": 2 }, "properties": { "bitWidth": 1, "period": 2 } },
+      { "id": "ff", "type": "DFF", "pos": { "x": 4, "y": 2 }, "properties": { "bitWidth": 1 } },
+      { "id": "not1", "type": "NOT", "pos": { "x": 7, "y": 2 }, "properties": { "bitWidth": 1 } },
+      { "id": "out1", "type": "OUTPUT", "pos": { "x": 10, "y": 2 }, "properties": { "bitWidth": 1 } }
+    ],
+    "wires": [
+      { "from": { "comp": "clk", "port": "out" }, "to": { "comp": "ff", "port": "clk" }, "bitWidth": 1 },
+      { "from": { "comp": "ff", "port": "q" }, "to": { "comp": "not1", "port": "in" }, "bitWidth": 1 },
+      { "from": { "comp": "not1", "port": "out" }, "to": { "comp": "ff", "port": "d" }, "bitWidth": 1 },
+      { "from": { "comp": "ff", "port": "q" }, "to": { "comp": "out1", "port": "in" }, "bitWidth": 1 }
+    ]
+  }
+}

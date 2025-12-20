@@ -249,11 +249,23 @@
         width: 100%;
         justify-content: flex-start;
       }
+
+      #logic-analyzer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        height: 140px;
+        background: #0a0a0f;
+        border-top: 1px solid #222;
+        z-index: 5;
+      }
     </style>
   </head>
   <body>
     <canvas id="canvas"></canvas>
     <div class="hud" id="hud"></div>
+    <canvas id="logic-analyzer"></canvas>
 
     <div class="modal-backdrop hidden" id="modal-backdrop">
       <div class="modal">
@@ -296,6 +308,8 @@
       const canvas = document.getElementById('canvas')
       const ctx = canvas.getContext('2d', { alpha: false })
       const hud = document.getElementById('hud')
+      const laCanvas = document.getElementById('logic-analyzer')
+      const laCtx = laCanvas.getContext('2d')
 
       const modalBackdrop = document.getElementById('modal-backdrop')
       const modalClose = document.getElementById('modal-close')
@@ -333,6 +347,14 @@
       let tickTimer = null
       const probes = new Map()
       const customLibrary = {}
+      let flowOffset = 0
+      const logicAnalyzer = {
+        enabled: true,
+        triggerWire: null,
+        triggered: true,
+        cursor: null,
+        maxSamples: 256,
+      }
       const GATE_DELAYS = {
         INPUT: 0,
         OUTPUT: 0,
@@ -345,6 +367,8 @@
         NOR: 1,
         XOR: 1,
         XNOR: 1,
+        DFF: 1,
+        CLOCK: 0,
       }
       let simTime = 0
       const eventQueue = []
@@ -446,7 +470,7 @@
             })
           }
         })
-        if (outputChanged && comp.inputs.length === 0) {
+        if (comp.inputs.length === 0 && comp.outputs.length) {
           queueComponent(comp, gateDelay(comp.type))
         }
       }
@@ -480,6 +504,7 @@
           this.bitWidth = clampBits(bitWidth)
           this.value = 0n
           this.frameToggles = 0
+          this.showFlow = false
         }
       }
 
@@ -670,6 +695,70 @@
           h: 2,
           defaultProperties: { bitWidth: 1 },
           setup: (c) => TOOLS.AND.setup(c),
+        },
+        DFF: {
+          label: 'DFF',
+          color: '#22c55e',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.inputs = [
+              new Port({
+                id: 'd',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: 0.8,
+                bitWidth: bits,
+              }),
+              new Port({
+                id: 'clk',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h - 0.8,
+                bitWidth: 1,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'q',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+            c.stateValue = c.stateValue ?? 0n
+            c.lastClock = c.lastClock ?? 0n
+          },
+        },
+        CLOCK: {
+          label: 'CLK',
+          color: '#67e8f9',
+          w: 2,
+          h: 2,
+          defaultProperties: { bitWidth: 1, period: 2 },
+          setup: (c) => {
+            const period = Math.max(1, Math.floor(c.properties.period || 2))
+            c.properties.period = period
+            c.clockPhase = c.clockPhase ?? 0
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: 1,
+              }),
+            ]
+            c.inputs = []
+          },
         },
         SPLITTER: {
           label: 'SPLIT',
@@ -947,6 +1036,7 @@
       function tickOnce() {
         const target = simTime + 1
         processEventsUntil(target)
+        sampleProbes()
       }
 
       function tick(count = 1) {
@@ -1028,6 +1118,23 @@
               }
             })
             return [maskValue(value, comp.properties.busSize || 1)]
+          }
+          case 'DFF': {
+            const dVal = maskValue(inputs[0] ?? 0n, comp.outputs[0]?.bitWidth || 1)
+            const clk = inputs[1] ?? 0n
+            const rising = clk !== 0n && comp.lastClock === 0n
+            if (rising) {
+              comp.stateValue = dVal
+            }
+            comp.lastClock = clk
+            return [comp.stateValue ?? 0n]
+          }
+          case 'CLOCK': {
+            const period = Math.max(1, Math.floor(comp.properties.period || 2))
+            comp.clockPhase = (comp.clockPhase + 1) % period
+            const highFor = Math.max(1, Math.floor(period / 2))
+            const val = comp.clockPhase < highFor ? 1n : 0n
+            return [val]
           }
           default: {
             if (customLibrary[comp.type]) {
@@ -1231,11 +1338,19 @@
 
         ctx.strokeStyle = toggled ? '#a855f7' : active ? '#fffa8b' : wireColor(wire)
         ctx.lineWidth = toggled || active ? 3 : 2
+        if (wire.showFlow) {
+          ctx.setLineDash([12, 10])
+          ctx.lineDashOffset = -flowOffset
+        }
         ctx.lineCap = 'round'
         ctx.beginPath()
         ctx.moveTo(start.x, start.y)
         ctx.lineTo(end.x, end.y)
         ctx.stroke()
+        if (wire.showFlow) {
+          ctx.setLineDash([])
+          ctx.lineDashOffset = 0
+        }
 
         if (wire.bitWidth > 1) {
           const midX = (start.x + end.x) / 2
@@ -1295,6 +1410,56 @@
             ctx.stroke()
           }
           ctx.restore()
+        })
+      }
+
+      function sampleProbes() {
+        probes.forEach((probe, id) => {
+          const wire = wires.find((w) => w.id === id)
+          if (!wire) return
+          const val = wire.value ?? 0n
+          if (!logicAnalyzer.triggered) {
+            if (logicAnalyzer.triggerWire === id && val !== 0n) {
+              logicAnalyzer.triggered = true
+            } else {
+              return
+            }
+          }
+          probe.history.push(val)
+          if (probe.history.length > logicAnalyzer.maxSamples) {
+            probe.history.shift()
+          }
+        })
+      }
+
+      function drawLogicAnalyzer() {
+        laCanvas.style.display = logicAnalyzer.enabled ? 'block' : 'none'
+        if (!logicAnalyzer.enabled) return
+        laCanvas.width = window.innerWidth
+        laCanvas.height = laCanvas.clientHeight || 140
+        laCtx.fillStyle = '#0a0a0f'
+        laCtx.fillRect(0, 0, laCanvas.width, laCanvas.height)
+        const entries = Array.from(probes.entries())
+        const rowHeight = 24
+        const marginTop = 12
+        entries.slice(0, Math.floor((laCanvas.height - marginTop) / rowHeight)).forEach(([id, probe], idx) => {
+          const yMid = marginTop + idx * rowHeight + rowHeight / 2
+          const data = probe.history
+          if (!data.length) return
+          laCtx.strokeStyle = logicAnalyzer.triggerWire === id ? '#22d3ee' : '#94a3b8'
+          laCtx.beginPath()
+          data.forEach((v, i) => {
+            const x = (i / Math.max(1, logicAnalyzer.maxSamples - 1)) * laCanvas.width
+            const high = v !== 0n
+            const y = high ? yMid - 6 : yMid + 6
+            if (i === 0) laCtx.moveTo(x, y)
+            else laCtx.lineTo(x, y)
+          })
+          laCtx.stroke()
+          laCtx.fillStyle = '#e5e7eb'
+          laCtx.font = '10px "JetBrains Mono"'
+          laCtx.textAlign = 'left'
+          laCtx.fillText(id, 6, yMid + 10)
         })
       }
 
@@ -1439,9 +1604,11 @@
       function render() {
         ctx.fillStyle = '#0f0f0f'
         ctx.fillRect(0, 0, canvas.width, canvas.height)
+        flowOffset = (flowOffset + 2) % 1000
         drawGrid()
         drawWires()
         drawAllComponents()
+        drawLogicAnalyzer()
         if (selectionStart && selectionEnd) {
           const sx = Math.min(selectionStart.x, selectionEnd.x) * GRID_SIZE + camera.x
           const sy = Math.min(selectionStart.y, selectionEnd.y) * GRID_SIZE + camera.y
@@ -1497,6 +1664,34 @@
         speedWrap.appendChild(speedLabel)
         speedWrap.appendChild(speedInput)
         hud.appendChild(speedWrap)
+
+        const laBtn = document.createElement('button')
+        laBtn.className = logicAnalyzer.enabled ? 'action active' : 'action'
+        laBtn.innerText = 'Logic Analyzer'
+        laBtn.onclick = () => {
+          logicAnalyzer.enabled = !logicAnalyzer.enabled
+          refreshHUD()
+        }
+        hud.appendChild(laBtn)
+
+        const laSelect = document.createElement('select')
+        laSelect.style.width = '100%'
+        laSelect.onchange = (e) => {
+          logicAnalyzer.triggerWire = e.target.value || null
+          logicAnalyzer.triggered = logicAnalyzer.triggerWire ? false : true
+        }
+        const noneOpt = document.createElement('option')
+        noneOpt.value = ''
+        noneOpt.textContent = 'Trigger: none'
+        laSelect.appendChild(noneOpt)
+        probes.forEach((_, id) => {
+          const opt = document.createElement('option')
+          opt.value = id
+          opt.textContent = `Trigger: ${id}`
+          if (logicAnalyzer.triggerWire === id) opt.selected = true
+          laSelect.appendChild(opt)
+        })
+        hud.appendChild(laSelect)
 
         const selectBtn = document.createElement('button')
         selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
@@ -1598,12 +1793,178 @@
                 from: { comp: w.fromCompId, port: w.fromPortId },
                 to: { comp: w.toCompId, port: w.toPortId },
                 bitWidth: w.bitWidth,
+                showFlow: !!w.showFlow,
               })),
             },
           },
           null,
           2
         )
+      }
+
+      function sanitizeId(name) {
+        const s = String(name || 'n').replace(/[^a-zA-Z0-9_]/g, '_')
+        return /^[0-9]/.test(s) ? `n_${s}` : s || 'n'
+      }
+
+      function widthDecl(width) {
+        const bits = clampBits(width || 1)
+        return bits > 1 ? `[${bits - 1}:0] ` : ''
+      }
+
+      function exportVerilog(moduleName = 'circuit') {
+        const modName = sanitizeId(moduleName)
+        const compById = new Map(components.map((c) => [c.id, c]))
+        const wireToInput = new Map()
+        wires.forEach((w) => {
+          wireToInput.set(`${w.toCompId}:${w.toPortId}`, w)
+        })
+
+        const outputNet = new Map()
+        function netForOutput(comp, port) {
+          const key = `${comp.id}:${port.id}`
+          if (outputNet.has(key)) return outputNet.get(key)
+          let base =
+            comp.type === 'INPUT'
+              ? sanitizeId(comp.id)
+              : sanitizeId(`${comp.id}_${port.id}`)
+          const net = base || sanitizeId(key)
+          outputNet.set(key, net)
+          return net
+        }
+
+        function inputNet(comp, port) {
+          const w = wireToInput.get(`${comp.id}:${port.id}`)
+          if (!w) return "1'b0"
+          const src = compById.get(w.fromCompId)
+          const srcPort = src?.outputs.find((p) => p.id === w.fromPortId)
+          if (!src || !srcPort) return "1'b0"
+          return netForOutput(src, srcPort)
+        }
+
+        const inputs = components
+          .filter((c) => c.type === 'INPUT')
+          .map((c) => ({
+            name: sanitizeId(c.id),
+            width: c.properties.bitWidth || 1,
+          }))
+
+        const outputs = components
+          .filter((c) => c.type === 'OUTPUT')
+          .map((c) => ({
+            name: sanitizeId(c.id),
+            width: c.properties.bitWidth || 1,
+            source: inputNet(c, c.inputs[0]),
+          }))
+
+        const wiresDecl = []
+        const assigns = []
+
+        components.forEach((comp) => {
+          if (comp.type === 'INPUT' || comp.type === 'OUTPUT') return
+          comp.outputs.forEach((port) => {
+            const net = netForOutput(comp, port)
+            wiresDecl.push({ name: net, width: port.bitWidth })
+          })
+          const ins = comp.inputs.map((p) => inputNet(comp, p))
+          switch (comp.type) {
+            case 'NOT':
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = ~(${ins[0]});`
+              )
+              break
+            case 'AND':
+            case 'NAND': {
+              const expr = ins.join(' & ')
+              const base = `(${expr})`
+              const body =
+                comp.type === 'NAND'
+                  ? `~${base}`
+                  : base
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = ${body};`
+              )
+              break
+            }
+            case 'OR':
+            case 'NOR': {
+              const expr = ins.join(' | ')
+              const base = `(${expr})`
+              const body =
+                comp.type === 'NOR'
+                  ? `~${base}`
+                  : base
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = ${body};`
+              )
+              break
+            }
+            case 'XOR':
+            case 'XNOR': {
+              const expr = ins.join(' ^ ')
+              const base = `(${expr})`
+              const body =
+                comp.type === 'XNOR'
+                  ? `~${base}`
+                  : base
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = ${body};`
+              )
+              break
+            }
+            case 'SPLITTER': {
+              const inNet = ins[0]
+              comp.outputs.forEach((port, idx) => {
+                assigns.push(
+                  `assign ${netForOutput(comp, port)} = ${inNet}[${idx}];`
+                )
+              })
+              break
+            }
+            case 'MERGER': {
+              const concat = comp.inputs
+                .map((_, idx) => ins[idx])
+                .reverse()
+                .join(', ')
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = {${concat}};`
+              )
+              break
+            }
+            default:
+              break
+          }
+        })
+
+        outputs.forEach((out) => {
+          if (out.source) {
+            assigns.push(`assign ${out.name} = ${out.source};`)
+          }
+        })
+
+        const uniqueWires = []
+        const seenWire = new Set()
+        wiresDecl.forEach((w) => {
+          if (seenWire.has(w.name)) return
+          seenWire.add(w.name)
+          uniqueWires.push(w)
+        })
+
+        const lines = []
+        const portList = [...inputs.map((p) => p.name), ...outputs.map((p) => p.name)]
+        lines.push(`module ${modName}(${portList.join(', ')});`)
+        inputs.forEach((p) =>
+          lines.push(`  input ${widthDecl(p.width)}${p.name};`)
+        )
+        outputs.forEach((p) =>
+          lines.push(`  output ${widthDecl(p.width)}${p.name};`)
+        )
+        uniqueWires.forEach((w) =>
+          lines.push(`  wire ${widthDecl(w.width)}${w.name};`)
+        )
+        assigns.forEach((a) => lines.push(`  ${a}`))
+        lines.push('endmodule')
+        return lines.join('\n')
       }
 
       function updateSaveTextarea() {
@@ -1685,6 +2046,7 @@
               toCompId: toComp.id,
               toPortId: toPort.id,
               bitWidth,
+              showFlow: !!w.showFlow,
             })
           )
         })
@@ -2041,6 +2403,12 @@
               if (dest) queueComponent(dest, gateDelay(dest.type))
             },
           })
+          items.push({
+            label: wireHit.showFlow ? 'Hide flow' : 'Show flow',
+            action: () => {
+              wireHit.showFlow = !wireHit.showFlow
+            },
+          })
         }
         if (compHit) {
           if (compHit.type === 'SPLITTER' || compHit.type === 'MERGER') {
@@ -2118,7 +2486,14 @@
             to: { comp: w.toCompId, port: w.toPortId },
             bitWidth: w.bitWidth,
             value: w.value,
+            showFlow: !!w.showFlow,
           })),
+        toggleWireFlow: (id, enable) => {
+          const wire = wires.find((w) => w.id === id)
+          if (!wire) return false
+          wire.showFlow = enable === undefined ? !wire.showFlow : Boolean(enable)
+          return true
+        },
         setSpeed: (hz) => setTickRate(hz),
         pause: () => pauseSimulation(),
         resume: () => resumeSimulation(),
