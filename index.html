@@ -523,6 +523,7 @@
       const customLibrary = {}
       let flowOffset = 0
       let viewScale = 1
+      let lastViewScale = 1
       let minimapDragging = false
       let spotlightOpen = false
       let shortcutOpen = false
@@ -601,7 +602,9 @@
       }
 
       function clientToScene(pos) {
-        return { x: pos.x / viewScale, y: pos.y / viewScale }
+        const px = pos?.x ?? 0
+        const py = pos?.y ?? 0
+        return { x: px / viewScale, y: py / viewScale }
       }
 
       function clampZoom(z) {
@@ -2623,7 +2626,10 @@
       }
 
       function render() {
-        ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0)
+        if (lastViewScale !== viewScale) {
+          ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0)
+          lastViewScale = viewScale
+        }
         const sceneWidth = canvas.width / viewScale
         const sceneHeight = canvas.height / viewScale
         ctx.fillStyle = '#0f0f0f'
@@ -4957,8 +4963,6 @@
             mode = mode === 'SELECTING' ? 'IDLE' : 'SELECTING'
             refreshHUD()
             break
-          default:
-            break
         }
       }
 
@@ -4997,6 +5001,7 @@
       window.addEventListener('resize', () => {
         canvas.width = window.innerWidth
         canvas.height = window.innerHeight
+        lastViewScale = Number.NaN
       })
 
       function apiLoad(json) {
