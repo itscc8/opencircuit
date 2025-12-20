@@ -1,0 +1,4905 @@
+;(function setupNodeGlobals() {
+  const noop = () => {}
+  if (typeof globalThis.window === 'undefined') {
+    globalThis.window = globalThis
+  }
+  if (typeof window.addEventListener === 'undefined') {
+    window.addEventListener = noop
+    window.removeEventListener = noop
+  }
+  if (typeof globalThis.document === 'undefined') {
+    const fakeClassList = { add: noop, remove: noop, contains: () => false }
+    const fakeCtx = {
+      clearRect: noop,
+      fillRect: noop,
+      beginPath: noop,
+      moveTo: noop,
+      lineTo: noop,
+      stroke: noop,
+      fillText: noop,
+      arc: noop,
+      save: noop,
+      restore: noop,
+      scale: noop,
+      translate: noop,
+      setLineDash: noop,
+      closePath: noop,
+    }
+    const fakeCanvas = () => ({
+      width: 1920,
+      height: 1080,
+      style: {},
+      getContext: () => fakeCtx,
+      addEventListener: noop,
+      removeEventListener: noop,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 1920, height: 1080 }),
+    })
+    const fakeEl = () => ({
+      classList: fakeClassList,
+      style: {},
+      appendChild: noop,
+      removeChild: noop,
+      addEventListener: noop,
+      removeEventListener: noop,
+      querySelector: () => fakeEl(),
+      querySelectorAll: () => [],
+      getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0 }),
+      focus: noop,
+      click: noop,
+      setAttribute: noop,
+      innerHTML: '',
+      value: '',
+      files: [],
+    })
+    globalThis.document = {
+      __isFake: true,
+      getElementById: (id) =>
+        id === 'canvas' || id === 'logic-analyzer' || id === 'minimap'
+          ? fakeCanvas()
+          : fakeEl(),
+      createElement: () => fakeEl(),
+      body: fakeEl(),
+      documentElement: { style: {} },
+      addEventListener: noop,
+      querySelector: () => fakeEl(),
+      querySelectorAll: () => [],
+    }
+  }
+  if (typeof globalThis.getComputedStyle === 'undefined') {
+    globalThis.getComputedStyle = () => ({ getPropertyValue: () => '0' })
+  }
+  if (typeof window.requestAnimationFrame === 'undefined') {
+    window.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 16)
+    window.cancelAnimationFrame = (id) => clearTimeout(id)
+  }
+  if (typeof window.innerWidth === 'undefined') {
+    window.innerWidth = 1920
+    window.innerHeight = 1080
+  }
+  if (!window.localStorage) {
+    const store = {}
+    window.localStorage = {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => {
+        store[k] = String(v)
+      },
+      removeItem: (k) => {
+        delete store[k]
+      },
+    }
+  }
+  if (!window.navigator) {
+    window.navigator = {}
+  }
+  if (!window.navigator.clipboard) {
+    window.navigator.clipboard = { writeText: async () => {} }
+  }
+  if (!window.URL) {
+    window.URL = {}
+  }
+  if (!window.URL.createObjectURL) {
+    window.URL.createObjectURL = () => ''
+    window.URL.revokeObjectURL = () => {}
+  }
+  if (typeof window.alert === 'undefined') {
+    window.alert = console.log
+  }
+  if (typeof window.prompt === 'undefined') {
+    window.prompt = () => null
+  }
+})()
+
+const canvas = document.getElementById('canvas')
+      const ctx = canvas.getContext('2d', { alpha: false })
+      const hud = document.getElementById('hud')
+      const laCanvas = document.getElementById('logic-analyzer')
+      const laCtx = laCanvas.getContext('2d')
+      const minimapCanvas = document.getElementById('minimap')
+      const minimapCtx = minimapCanvas.getContext('2d')
+
+      const modalBackdrop = document.getElementById('modal-backdrop')
+      const modalClose = document.getElementById('modal-close')
+      const tabSave = document.getElementById('tab-save')
+      const tabLoad = document.getElementById('tab-load')
+      const saveTextarea = document.getElementById('save-json')
+      const loadTextarea = document.getElementById('load-json')
+      const loadFileInput = document.getElementById('load-file')
+      const copyBtn = document.getElementById('copy-json')
+      const downloadBtn = document.getElementById('download-json')
+      const applyLoadBtn = document.getElementById('apply-load')
+      const ctxMenu = document.getElementById('ctx-menu')
+      const spotlightBackdrop = document.getElementById('spotlight-backdrop')
+      const spotlightInput = document.getElementById('spotlight-input')
+      const spotlightResults = document.getElementById('spotlight-results')
+      const shortcutBackdrop = document.getElementById('shortcut-backdrop')
+      const shortcutList = document.getElementById('shortcut-list')
+      const shortcutClose = document.getElementById('shortcut-close')
+      const shortcutExport = document.getElementById('shortcut-export')
+      const shortcutImport = document.getElementById('shortcut-import')
+      const shortcutReset = document.getElementById('shortcut-reset')
+
+      const GRID_SIZE = 25
+      const PORT_RADIUS = 6
+      const MAX_BITS = 64
+      const LOGIC_LOW = 0n
+      const LOGIC_HIGH = 1n
+      const DEFAULT_NET = "1'b0"
+      const BLOB_CLEANUP_DELAY_MS = 500 // allow download to finish before revoking blob URLs
+      const HUD_OFFSET =
+        parseInt(getComputedStyle(document.documentElement).getPropertyValue('--hud-offset')) ||
+        200
+      const MAX_DRC_DISPLAY_COUNT = 5
+      const BYTE_MASK = 0xff
+      const BYTE_MASK_BIG = 0xffn
+      const SAFE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+      const ASM_ERROR_PREVIEW_CHARS = 120
+      const MIN_ZOOM = 0.4
+      const MAX_ZOOM = 2
+      const DEFAULT_SHORTCUTS = {
+        wire: 'w',
+        rotate: 'r',
+        remove: 'delete',
+        toggle: 'space',
+        select: 's',
+      }
+
+      let components = []
+      let wires = []
+      const mainContext = {
+        name: 'main',
+        type: 'main',
+        componentsRef: null,
+        wiresRef: null,
+      }
+      let contextStack = []
+      let currentContext = mainContext
+      let camera = { x: 0, y: 0 }
+      let mode = 'IDLE'
+      let placingType = null
+      let draggingComp = null
+      let dragOffset = { x: 0, y: 0 }
+      let dragStart = { x: 0, y: 0 }
+      let mouseGrid = { x: 0, y: 0 }
+      let draggingWireStart = null
+      let hoverPort = null
+      let draggingFromMenu = false
+      let selectionStart = null
+      let selectionEnd = null
+      let selectedComponents = []
+      let isPaused = false
+      let ticksPerSecond = 30
+      let tickTimer = null
+      const probes = new Map()
+      const customLibrary = {}
+      let flowOffset = 0
+      let viewScale = 1
+      let lastViewScale = 1
+      let minimapDragging = false
+      let spotlightOpen = false
+      let shortcutOpen = false
+      let lastPointerScene = { x: 0, y: 0 }
+      let coverageEnabled = false
+      const coverageStats = new Map()
+      let shortcutMap = loadShortcuts()
+      let shortcutBuffer = { ...shortcutMap }
+      const logicAnalyzer = {
+        enabled: true,
+        triggerWire: null,
+        triggered: true,
+        cursor: null,
+        maxSamples: 256,
+      }
+      const HISTORY_LIMIT = 50
+      let historyStack = []
+      let historyIndex = -1
+      let historyMuted = false
+      const testbench = {
+        script: '[]',
+        running: false,
+        lastResult: null,
+        stopRequested: false,
+      }
+      mainContext.componentsRef = components
+      mainContext.wiresRef = wires
+      currentContext = mainContext
+      const GATE_DELAYS = {
+        INPUT: 0,
+        OUTPUT: 0,
+        SPLITTER: 0,
+        MERGER: 0,
+        NOT: 1,
+        AND: 1,
+        NAND: 1,
+        OR: 1,
+        NOR: 1,
+        XOR: 1,
+        XNOR: 1,
+        DFF: 1,
+        CLOCK: 0,
+      }
+      let simTime = 0
+      const eventQueue = []
+      const scheduledComponents = new Map()
+      const MAX_EVENTS_PER_TICK = 5000
+      let drcFindings = []
+      const breakpoints = []
+      let lastBreakpointHit = null
+      const bundles = new Map()
+      const assemblerState = {
+        isaText: 'NOP => 0x00\nLOAD (?<imm>0x[0-9a-fA-F]+|\\d+) => ${imm}',
+        sourceText: 'NOP\nLOAD 0xAA',
+        lastBytes: [],
+      }
+
+      function clampBits(value, fallback = 1) {
+        const n = Number(value)
+        if (!Number.isFinite(n)) return fallback
+        return Math.min(MAX_BITS, Math.max(1, Math.floor(n)))
+      }
+
+      function maskValue(value, bits) {
+        const b = BigInt(clampBits(bits))
+        const mask = (1n << b) - 1n
+        return BigInt(value ?? 0) & mask
+      }
+
+      function toBig(value) {
+        return typeof value === 'bigint' ? value : BigInt(value ?? 0)
+      }
+
+      function makeId(prefix) {
+        return `${prefix}_${Math.random().toString(36).slice(2, 9)}`
+      }
+
+      function clientToScene(pos) {
+        const px = pos?.x ?? 0
+        const py = pos?.y ?? 0
+        return { x: px / viewScale, y: py / viewScale }
+      }
+
+      function clampZoom(z) {
+        const n = Number(z)
+        if (!Number.isFinite(n)) return viewScale
+        return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, n))
+      }
+
+      function setZoom(nextZoom, focus = { x: canvas.width / 2, y: canvas.height / 2 }) {
+        const target = clampZoom(nextZoom)
+        const sceneFocus = clientToScene(focus)
+        const worldX = sceneFocus.x - camera.x
+        const worldY = sceneFocus.y - camera.y
+        viewScale = target
+        camera.x = focus.x / viewScale - worldX
+        camera.y = focus.y / viewScale - worldY
+      }
+
+      function getViewState() {
+        return {
+          zoom: viewScale,
+          camera: { x: camera.x, y: camera.y },
+        }
+      }
+
+      function loadShortcuts() {
+        try {
+          const raw = localStorage.getItem('oc_shortcuts')
+          if (raw) {
+            const parsed = JSON.parse(raw)
+            return sanitizeShortcutMap(parsed)
+          }
+        } catch (err) {
+          console.warn('Shortcut load failed', err)
+        }
+        return { ...DEFAULT_SHORTCUTS }
+      }
+
+      function persistShortcuts(next) {
+        const cleaned = sanitizeShortcutMap(next)
+        shortcutMap = cleaned
+        shortcutBuffer = { ...shortcutMap }
+        try {
+          localStorage.setItem('oc_shortcuts', JSON.stringify(shortcutMap))
+        } catch (err) {
+          console.warn('Shortcut save failed', err)
+        }
+      }
+
+      function normalizeKeyBinding(key) {
+        if (!key) return ''
+        const raw = key.toString().trim().toLowerCase()
+        const parts = raw.split('+').filter(Boolean)
+        const k = (parts[parts.length - 1] || '').trim()
+        if (!k) return ''
+        if (k === ' ' || k === 'space') return 'space'
+        if (k === 'del' || k === 'delete') return 'delete'
+        if (k === 'backspace') return 'backspace'
+        const allowed = ['enter', 'tab', 'escape']
+        if (allowed.includes(k)) return k
+        return k.length === 1 ? k : ''
+      }
+
+      function sanitizeShortcutMap(map) {
+        const next = { ...DEFAULT_SHORTCUTS }
+        if (map && typeof map === 'object') {
+          Object.keys(DEFAULT_SHORTCUTS).forEach((action) => {
+            const val = normalizeKeyBinding(map[action])
+            if (val) next[action] = val
+          })
+        }
+        return next
+      }
+
+      function findShortcutAction(key) {
+        const norm = normalizeKeyBinding(key)
+        return Object.entries(shortcutMap).find(([, val]) => normalizeKeyBinding(val) === norm)?.[0]
+      }
+
+      function gateDelay(type) {
+        return GATE_DELAYS[type] ?? 1
+      }
+
+      function resetSimulationClock() {
+        simTime = 0
+        eventQueue.length = 0
+        scheduledComponents.clear()
+      }
+
+      function queueComponent(comp, delay = gateDelay(comp?.type)) {
+        if (!comp) return
+        const time = simTime + Math.max(0, delay)
+        const existing = scheduledComponents.get(comp.id)
+        if (existing !== undefined && existing <= time) return
+        scheduledComponents.set(comp.id, time)
+        eventQueue.push({ time, compId: comp.id })
+      }
+
+      function processEventsUntil(targetTime) {
+        let processed = 0
+        while (eventQueue.length) {
+          eventQueue.sort((a, b) => a.time - b.time)
+          const next = eventQueue[0]
+          if (!next || next.time > targetTime) break
+          if (processed++ > MAX_EVENTS_PER_TICK) break
+          const evt = eventQueue.shift()
+          const expected = scheduledComponents.get(evt.compId)
+          if (expected !== evt.time) continue
+          scheduledComponents.delete(evt.compId)
+          simTime = Math.max(simTime, evt.time)
+          const comp = components.find((c) => c.id === evt.compId)
+          if (comp) evaluateAndPropagate(comp)
+        }
+        simTime = Math.max(simTime, targetTime)
+      }
+
+      function evaluateAndPropagate(comp) {
+        const inputs = comp.inputs.map((port) => {
+          const wire = wires.find(
+            (w) => w.toCompId === comp.id && w.toPortId === port.id
+          )
+          const val = maskValue(wire ? wire.value : port.value ?? 0n, port.bitWidth)
+          port.value = val
+          return val
+        })
+        const outputs = evaluateComponent(comp, inputs, { components, wires })
+        if (comp.type === 'OUTPUT') {
+          comp.isLit = (inputs[0] ?? 0n) !== 0n
+        }
+        let outputChanged = false
+        comp.outputs.forEach((port, idx) => {
+          const newVal = maskValue(outputs[idx] ?? 0n, port.bitWidth)
+          if (port.value !== newVal) {
+            port.value = newVal
+            comp.currentValue = newVal
+            comp.nextValue = newVal
+            outputChanged = true
+            wires.forEach((w) => {
+              if (w.fromCompId === comp.id && w.fromPortId === port.id) {
+                if (w.value !== newVal) {
+                  w.frameToggles = (w.frameToggles || 0) + 1
+                  w.value = newVal
+                  const dest = components.find((c) => c.id === w.toCompId)
+                  if (dest) queueComponent(dest, gateDelay(dest.type))
+                }
+                if (probes.has(w.id)) {
+                  const probe = probes.get(w.id)
+                  probe.history.push(newVal)
+                  if (probe.history.length > 50) probe.history.shift()
+                }
+              }
+            })
+          }
+        })
+        if (comp.inputs.length === 0 && comp.outputs.length) {
+          queueComponent(comp, gateDelay(comp.type))
+        }
+      }
+
+      function syncNamedNet(wire, value) {
+        if (!wire?.netName) return
+        wires.forEach((other) => {
+          if (other === wire) return
+          if (other.netName === wire.netName) {
+            if (other.value !== value) {
+              other.value = value
+              const dest = components.find((c) => c.id === other.toCompId)
+              if (dest) queueComponent(dest, gateDelay(dest.type))
+            }
+          }
+        })
+      }
+
+      function ensureMemory(comp) {
+        if (!comp) return null
+        const size = Math.max(1, Math.floor(comp.properties?.size || 1))
+        if (!(comp.memory instanceof Uint8Array) || comp.memory.length !== size) {
+          comp.memory = new Uint8Array(size)
+        }
+        return comp.memory
+      }
+
+      function memoryToHex(comp) {
+        ensureMemory(comp)
+        return Array.from(comp.memory || [])
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join(' ')
+      }
+
+      function hexToBytes(input) {
+        if (!input) return []
+        return input
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((v) => parseInt(v, 16) & BYTE_MASK)
+          .filter((n) => Number.isFinite(n))
+      }
+
+      function calculateMemoryAddress(input, memoryLength) {
+        const len = Math.max(1, memoryLength || 1)
+        const lenBig = BigInt(len)
+        const raw = toBig(input)
+        // Normalize to a non-negative address even if the input was negative
+        const mod = ((raw % lenBig) + lenBig) % lenBig
+        return Number(mod)
+      }
+
+      function openHexEditor(comp) {
+        if (!comp) return
+        ensureMemory(comp)
+        const current = memoryToHex(comp)
+        const next = prompt(`Edit ${comp.type} ${comp.id} (hex bytes)`, current)
+        if (next === null) return
+        const bytes = hexToBytes(next)
+        comp.memory.fill(0)
+        comp.memory.set(bytes.slice(0, comp.memory.length))
+        queueComponent(comp, 0)
+      }
+
+      function runDRC() {
+        const warnings = []
+        const driverMap = new Map()
+        wires.forEach((w) => {
+          const netKey = w.netName ? `net:${w.netName}` : `wire:${w.id}`
+          const srcKey = `${w.fromCompId}:${w.fromPortId}`
+          if (!driverMap.has(netKey)) driverMap.set(netKey, new Set())
+          driverMap.get(netKey).add(srcKey)
+          const fromPort = getPort(w.fromCompId, w.fromPortId)
+          const toPort = getPort(w.toCompId, w.toPortId)
+          if (fromPort && toPort && fromPort.bitWidth !== toPort.bitWidth) {
+            warnings.push({
+              type: 'width_mismatch',
+              message: `Width mismatch on wire ${w.id}`,
+              location: w.id,
+            })
+          }
+          if (w.bundle && bundles.has(w.bundle)) {
+            const b = bundles.get(w.bundle)
+            if (w.bitWidth !== b.width) {
+              warnings.push({
+                type: 'bundle_width',
+                message: `Bundle ${b.name} expects ${b.width}-bit (wire ${w.id})`,
+                location: w.id,
+              })
+            }
+          }
+        })
+
+        driverMap.forEach((drivers, key) => {
+          if (key.startsWith('net:') && drivers.size > 1) {
+            warnings.push({
+              type: 'short_circuit',
+              message: `Multiple drivers detected on ${key.slice(4)}`,
+              location: key,
+            })
+          }
+        })
+
+        components.forEach((c) => {
+          c.inputs.forEach((p) => {
+            const connected = wires.some(
+              (w) => w.toCompId === c.id && w.toPortId === p.id
+            )
+            if (!connected) {
+              warnings.push({
+                type: 'floating_input',
+                message: `Floating input ${c.id}:${p.id}`,
+                location: c.id,
+              })
+            }
+          })
+          c.outputs.forEach((p) => {
+            const connected = wires.some(
+              (w) => w.fromCompId === c.id && w.fromPortId === p.id
+            )
+            if (!connected) {
+              warnings.push({
+                type: 'unconnected_output',
+                message: `Unconnected output ${c.id}:${p.id}`,
+                location: c.id,
+              })
+            }
+          })
+        })
+        drcFindings = warnings
+        return warnings
+      }
+
+      function clearCoverage() {
+        coverageStats.clear()
+        wires.forEach((w) => {
+          w.frameToggles = 0
+        })
+      }
+
+      function setCoverageEnabled(enable) {
+        coverageEnabled = !!enable
+        if (coverageEnabled) {
+          clearCoverage()
+        }
+      }
+
+      function seedInitialEvents() {
+        scheduledComponents.clear()
+        eventQueue.length = 0
+        components.forEach((c) => queueComponent(c, 0))
+      }
+
+      class Port {
+        constructor({ id, parentId, type, relativeX, relativeY, bitWidth = 1 }) {
+          this.id = id
+          this.parentId = parentId
+          this.type = type
+          this.relativeX = relativeX
+          this.relativeY = relativeY
+          this.bitWidth = clampBits(bitWidth)
+          this.value = 0n
+          this.nextValue = 0n
+        }
+      }
+
+      class Wire {
+        constructor({
+          id,
+          fromCompId,
+          fromPortId,
+          toCompId,
+          toPortId,
+          bitWidth,
+          netName = null,
+          path = null,
+          pathIsGrid = false,
+          bundle = null,
+        }) {
+          this.id = id || makeId('wire')
+          this.fromCompId = fromCompId
+          this.fromPortId = fromPortId
+          this.toCompId = toCompId
+          this.toPortId = toPortId
+          this.bitWidth = clampBits(bitWidth)
+          this.value = 0n
+          this.frameToggles = 0
+          this.showFlow = false
+          this.netName = netName || null
+          this.path = path || null
+          this.pathIsGrid = !!pathIsGrid
+          this.bundle = bundle || null
+        }
+      }
+
+      class Component {
+        constructor(gx, gy, type, properties = {}) {
+          this.gx = gx
+          this.gy = gy
+          this.type = type
+          this.id = makeId('cmp')
+          this.state = false
+          this.isLit = false
+          this.overrideValue = null
+          this.currentValue = 0n
+          this.nextValue = 0n
+          this.properties = {
+            ...(TOOLS[type]?.defaultProperties || {}),
+            ...properties,
+          }
+          this.inputs = []
+          this.outputs = []
+          this.w = TOOLS[type]?.w || 2
+          this.h = TOOLS[type]?.h || 2
+          configureComponent(this)
+        }
+      }
+
+      function configureComponent(comp) {
+        const def = TOOLS[comp.type]
+        if (!def) return
+        comp.inputs = []
+        comp.outputs = []
+        comp.w = def.w
+        comp.h = def.h
+        def.setup(comp)
+        pruneWiresForComponent(comp)
+        queueComponent(comp, 0)
+      }
+
+      const TOOLS = {
+        INPUT: {
+          label: 'IN',
+          color: '#3b82f6',
+          w: 2,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        OUTPUT: {
+          label: 'OUT',
+          color: '#22c55e',
+          w: 2,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.inputs = [
+              new Port({
+                id: 'in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        NOT: {
+          label: 'NOT',
+          color: '#ef4444',
+          w: 2,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.inputs = [
+              new Port({
+                id: 'in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        AND: {
+          label: 'AND',
+          color: '#eab308',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.inputs = [
+              new Port({
+                id: 'in0',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: 0.6,
+                bitWidth: bits,
+              }),
+              new Port({
+                id: 'in1',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h - 0.6,
+                bitWidth: bits,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        NAND: {
+          label: 'NAND',
+          color: '#14b8a6',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        OR: {
+          label: 'OR',
+          color: '#a855f7',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        NOR: {
+          label: 'NOR',
+          color: '#f97316',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        XOR: {
+          label: 'XOR',
+          color: '#ec4899',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        XNOR: {
+          label: 'XNOR',
+          color: '#6366f1',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => TOOLS.AND.setup(c),
+        },
+        DFF: {
+          label: 'DFF',
+          color: '#22c55e',
+          w: 2.5,
+          h: 2,
+          defaultProperties: { bitWidth: 1 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 1)
+            c.properties.bitWidth = bits
+            c.inputs = [
+              new Port({
+                id: 'd',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: 0.8,
+                bitWidth: bits,
+              }),
+              new Port({
+                id: 'clk',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h - 0.8,
+                bitWidth: 1,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'q',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+            c.stateValue = 0n
+            c.lastClock = 0n
+            c.properties.selfSchedule = !!c.properties.selfSchedule
+          },
+        },
+        CLOCK: {
+          label: 'CLK',
+          color: '#67e8f9',
+          w: 2,
+          h: 2,
+          defaultProperties: { bitWidth: 1, period: 2 },
+          setup: (c) => {
+            const period = Math.max(1, Math.floor(c.properties.period || 2))
+            c.properties.period = period
+            c.clockPhase = c.clockPhase ?? 0
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: 1,
+              }),
+            ]
+            c.inputs = []
+          },
+        },
+        FSM: {
+          label: 'FSM',
+          color: '#38bdf8',
+          w: 3,
+          h: 2.5,
+          defaultProperties: { inputWidth: 1, fsm: null },
+          setup: (c) => {
+            const def = normalizeFsmDefinition(c.properties.fsm)
+            c.properties.fsm = def
+            const bits = clampBits(
+              Math.max(1, Math.ceil(Math.log2(Math.max(1, def.states.length))) || 1)
+            )
+            c.properties.stateBits = bits
+            const inBits = clampBits(c.properties.inputWidth || 1)
+            c.inputs = [
+              new Port({
+                id: 'in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2 - 0.5,
+                bitWidth: inBits,
+              }),
+              new Port({
+                id: 'clk',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2 + 0.5,
+                bitWidth: 1,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'state',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+            c.fsmState = def.initial || def.states[0]?.id || 'S0'
+            c.lastClock = c.lastClock ?? 0n
+          },
+        },
+        ROM: {
+          label: 'ROM',
+          color: '#facc15',
+          w: 3,
+          h: 3,
+          defaultProperties: { bitWidth: 8, size: 64 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 8)
+            const size = Math.max(1, Math.floor(c.properties.size || 64))
+            c.properties.bitWidth = bits
+            c.properties.size = size
+            c.properties.addrWidth = clampBits(Math.ceil(Math.log2(size)) || 1, 1)
+            ensureMemory(c)
+            c.inputs = [
+              new Port({
+                id: 'addr',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2,
+                bitWidth: c.properties.addrWidth,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'data',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        RAM: {
+          label: 'RAM',
+          color: '#4ade80',
+          w: 3,
+          h: 3,
+          defaultProperties: { bitWidth: 8, size: 64 },
+          setup: (c) => {
+            const bits = clampBits(c.properties.bitWidth || 8)
+            const size = Math.max(1, Math.floor(c.properties.size || 64))
+            const addrWidth = clampBits(Math.ceil(Math.log2(size)) || 1)
+            c.properties.bitWidth = bits
+            c.properties.size = size
+            c.properties.addrWidth = addrWidth
+            ensureMemory(c)
+            c.lastClock = c.lastClock ?? 0n
+            c.inputs = [
+              new Port({
+                id: 'addr',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2 - 0.6,
+                bitWidth: addrWidth,
+              }),
+              new Port({
+                id: 'data_in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2 + 0.6,
+                bitWidth: bits,
+              }),
+              new Port({
+                id: 'we',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h - 0.6,
+                bitWidth: 1,
+              }),
+              new Port({
+                id: 'clk',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: 0.6,
+                bitWidth: 1,
+              }),
+            ]
+            c.outputs = [
+              new Port({
+                id: 'data',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: bits,
+              }),
+            ]
+          },
+        },
+        SPLITTER: {
+          label: 'SPLIT',
+          color: '#0ea5e9',
+          w: 2,
+          h: 2,
+          defaultProperties: { busSize: 8 },
+          setup: (c) => {
+            const count =
+              clampBits(c.properties.busSize ?? c.properties.outputs ?? 8) || 8
+            c.properties.busSize = count
+            c.h = Math.max(2, count)
+            const spacing = c.h / (count + 1)
+            c.inputs = [
+              new Port({
+                id: 'in',
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: c.h / 2,
+                bitWidth: count,
+              }),
+            ]
+            c.outputs = []
+            for (let i = 0; i < count; i++) {
+              c.outputs.push(
+                new Port({
+                  id: `out${i}`,
+                  parentId: c.id,
+                  type: 'OUT',
+                  relativeX: c.w,
+                  relativeY: spacing * (i + 1),
+                  bitWidth: 1,
+                })
+              )
+            }
+          },
+        },
+        MERGER: {
+          label: 'MERGE',
+          color: '#f59e0b',
+          w: 2,
+          h: 2,
+          defaultProperties: { busSize: 8 },
+          setup: (c) => {
+            const count =
+              clampBits(c.properties.busSize ?? c.properties.inputs ?? 8) || 8
+            c.properties.busSize = count
+            c.h = Math.max(2, count)
+            const spacing = c.h / (count + 1)
+            c.inputs = []
+            for (let i = 0; i < count; i++) {
+              c.inputs.push(
+                new Port({
+                  id: `in${i}`,
+                  parentId: c.id,
+                  type: 'IN',
+                  relativeX: 0,
+                  relativeY: spacing * (i + 1),
+                  bitWidth: 1,
+                })
+              )
+            }
+            c.outputs = [
+              new Port({
+                id: 'out',
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: c.h / 2,
+                bitWidth: count,
+              }),
+            ]
+          },
+        },
+      }
+
+      function resolveParamValue(value, params = {}) {
+        if (typeof value === 'function') {
+          return clampBits(value(params))
+        }
+        if (typeof value === 'string') {
+          const key = value.startsWith('$') ? value.slice(1) : null
+          if (key && params[key] !== undefined) return clampBits(params[key])
+          const asNum = Number(value)
+          if (Number.isFinite(asNum)) return clampBits(asNum)
+        }
+        return clampBits(value ?? 1)
+      }
+
+      function registerCustomTool(def) {
+        const ins = def.inputs.length
+        const outs = def.outputs.length
+        const height = Math.max(2, ins, outs)
+        const hue = Math.floor(Math.random() * 360)
+        TOOLS[def.name] = {
+          label: def.name,
+          color: `hsl(${hue},70%,65%)`,
+          w: 3,
+          h: height,
+          defaultProperties: { parameters: { ...(def.parameters || {}) } },
+          setup: (c) => {
+            const params = {
+              ...(def.parameters || {}),
+              ...(c.properties.parameters || c.properties.params || {}),
+            }
+            c.parameters = params
+            c.w = 3
+            c.h = height
+            c.inputs = def.inputs.map((p, idx) => {
+              const bw = resolveParamValue(p.bitWidth, params)
+              return new Port({
+                id: `in${idx}`,
+                parentId: c.id,
+                type: 'IN',
+                relativeX: 0,
+                relativeY: (idx + 1) * (c.h / (ins + 1)),
+                bitWidth: bw,
+              })
+            })
+            c.outputs = def.outputs.map((p, idx) => {
+              const bw = resolveParamValue(p.bitWidth, params)
+              return new Port({
+                id: `out${idx}`,
+                parentId: c.id,
+                type: 'OUT',
+                relativeX: c.w,
+                relativeY: (idx + 1) * (c.h / (outs + 1)),
+                bitWidth: bw,
+              })
+            })
+            c.customName = def.name
+          },
+        }
+        customLibrary[def.name] = { ...def, parameters: { ...(def.parameters || {}) } }
+      }
+
+      function componentAt(gridX, gridY) {
+        return components.find(
+          (c) =>
+            gridX >= c.gx &&
+            gridX <= c.gx + c.w &&
+            gridY >= c.gy &&
+            gridY <= c.gy + c.h
+        )
+      }
+
+      function checkCollision(gx, gy, type, excludeId = null) {
+        const def = TOOLS[type]
+        if (!def) return false
+        const w = def.w
+        const h = def.h
+        return components.some((c) => {
+          if (c.id === excludeId) return false
+          return (
+            gx < c.gx + c.w &&
+            gx + w > c.gx &&
+            gy < c.gy + c.h &&
+            gy + h > c.gy
+          )
+        })
+      }
+
+      function getPort(compId, portId) {
+        const comp = components.find((c) => c.id === compId)
+        if (!comp) return null
+        return [...comp.inputs, ...comp.outputs].find((p) => p.id === portId)
+      }
+
+      function portPosition(comp, port) {
+        return {
+          x: (comp.gx + port.relativeX) * GRID_SIZE + camera.x,
+          y: (comp.gy + port.relativeY) * GRID_SIZE + camera.y,
+        }
+      }
+
+      function hitTestPort(clientX, clientY) {
+        const sceneX = clientX / viewScale
+        const sceneY = clientY / viewScale
+        let hit = null
+        components.forEach((comp) => {
+          const ports = [...comp.inputs, ...comp.outputs]
+          ports.forEach((port) => {
+            const pos = portPosition(comp, port)
+            const dx = sceneX - pos.x
+            const dy = sceneY - pos.y
+            if (Math.hypot(dx, dy) <= PORT_RADIUS + 4) {
+              hit = { component: comp, port }
+            }
+          })
+        })
+        return hit
+      }
+
+      function pruneWiresForComponent(comp) {
+        const inIds = new Set(comp.inputs.map((p) => p.id))
+        const outIds = new Set(comp.outputs.map((p) => p.id))
+        wires = wires.filter((w) => {
+          if (w.toCompId === comp.id && !inIds.has(w.toPortId)) {
+            if (w.bundle) removeWireFromBundle(w.id)
+            return false
+          }
+          if (w.fromCompId === comp.id && !outIds.has(w.fromPortId)) {
+            if (w.bundle) removeWireFromBundle(w.id)
+            return false
+          }
+          const fromPort = getPort(w.fromCompId, w.fromPortId)
+          const toPort = getPort(w.toCompId, w.toPortId)
+          if (!fromPort || !toPort) {
+            if (w.bundle) removeWireFromBundle(w.id)
+            return false
+          }
+          if (fromPort.bitWidth !== toPort.bitWidth) {
+            if (w.bundle) removeWireFromBundle(w.id)
+            return false
+          }
+          return true
+        })
+      }
+
+      function tryConnectPorts(a, b) {
+        let from = a
+        let to = b
+        if (a.port.type === 'IN' && b.port.type === 'OUT') {
+          from = b
+          to = a
+        }
+        if (from.port.type !== 'OUT' || to.port.type !== 'IN') return
+        if (from.component.id === to.component.id) return
+        if (from.port.bitWidth !== to.port.bitWidth) {
+          alert('Bit-widths must match to connect these ports.')
+          return
+        }
+
+        wires = wires.filter(
+          (w) => !(w.toCompId === to.component.id && w.toPortId === to.port.id)
+        )
+
+        wires.push(
+          new Wire({
+            fromCompId: from.component.id,
+            fromPortId: from.port.id,
+            toCompId: to.component.id,
+            toPortId: to.port.id,
+            bitWidth: from.port.bitWidth,
+          })
+        )
+        applyAutoRoute(wires[wires.length - 1])
+        queueComponent(to.component, gateDelay(to.component.type))
+        pushHistoryState('connect')
+      }
+
+      function removeComponent(comp) {
+        wires = wires.filter((w) => {
+          const keep = w.fromCompId !== comp.id && w.toCompId !== comp.id
+          if (!keep) {
+            probes.delete(w.id)
+            if (w.bundle) removeWireFromBundle(w.id)
+            const dest = components.find((c) => c.id === w.toCompId)
+            if (dest) queueComponent(dest, gateDelay(dest.type))
+          }
+          return keep
+        })
+        const idx = components.indexOf(comp)
+        if (idx >= 0) components.splice(idx, 1)
+        pushHistoryState('remove')
+      }
+
+      function runTickFor(comps, wireList) {
+        const context = { components: comps, wires: wireList }
+        comps.forEach((c) => {
+          c.isLit = false
+        })
+
+        comps.forEach((comp) => {
+          const inputs = comp.inputs.map((port) => {
+            const wire = wireList.find(
+              (w) => w.toCompId === comp.id && w.toPortId === port.id
+            )
+            const val = maskValue(wire ? wire.value : port.value ?? 0n, port.bitWidth)
+            port.value = val
+            return val
+          })
+          const outputs = evaluateComponent(comp, inputs, context)
+          comp.outputs.forEach((port, idx) => {
+            port.nextValue = maskValue(outputs[idx] ?? 0n, port.bitWidth)
+          })
+        })
+
+        comps.forEach((comp) => {
+          comp.outputs.forEach((port) => {
+            comp.currentValue = port.value
+            comp.nextValue = port.nextValue ?? 0n
+            port.value = port.nextValue ?? 0n
+          })
+        })
+
+        wireList.forEach((wire) => {
+          const fromComp = comps.find((c) => c.id === wire.fromCompId)
+          const fromPort = fromComp?.outputs.find((p) => p.id === wire.fromPortId)
+          const newVal = fromPort ? maskValue(fromPort.value, wire.bitWidth) : 0n
+          if (wire.value !== newVal) {
+            wire.frameToggles = (wire.frameToggles || 0) + 1
+          }
+          wire.value = newVal
+          syncNamedNet(wire, newVal)
+          if (probes.has(wire.id)) {
+            const probe = probes.get(wire.id)
+            probe.history.push(newVal)
+            if (probe.history.length > 50) probe.history.shift()
+          }
+        })
+      }
+
+      function tickOnce() {
+        const target = simTime + 1
+        processEventsUntil(target)
+        sampleProbes()
+        checkBreakpoints()
+      }
+
+      function tick(count = 1) {
+        lastBreakpointHit = null
+        for (let i = 0; i < count; i++) {
+          tickOnce()
+          if (lastBreakpointHit) break
+        }
+      }
+
+      function evaluateComponent(comp, inputs, context) {
+        switch (comp.type) {
+          case 'INPUT': {
+            const bits = comp.outputs[0]?.bitWidth || 1
+            const high = (1n << BigInt(bits)) - 1n
+            if (comp.overrideValue !== null && comp.overrideValue !== undefined) {
+              return [maskValue(comp.overrideValue, bits)]
+            }
+            return [comp.state ? high : 0n]
+          }
+          case 'OUTPUT': {
+            comp.isLit = (inputs[0] ?? 0n) !== 0n
+            return []
+          }
+          case 'NOT': {
+            const port = comp.outputs[0]
+            const result = ~toBig(inputs[0] ?? 0n)
+            return [maskValue(result, port?.bitWidth || 1)]
+          }
+          case 'AND': {
+            const port = comp.outputs[0]
+            const val = inputs.reduce(
+              (acc, cur) => acc & toBig(cur ?? 0n),
+              toBig(inputs[0] ?? 0n)
+            )
+            return [maskValue(val, port?.bitWidth || 1)]
+          }
+          case 'NAND': {
+            const [res] = evaluateComponent(
+              { ...comp, type: 'AND' },
+              inputs
+            )
+            const port = comp.outputs[0]
+            return [maskValue(~toBig(res ?? 0n), port?.bitWidth || 1)]
+          }
+          case 'OR': {
+            const port = comp.outputs[0]
+            const val = inputs.reduce(
+              (acc, cur) => acc | toBig(cur ?? 0n),
+              toBig(inputs[0] ?? 0n)
+            )
+            return [maskValue(val, port?.bitWidth || 1)]
+          }
+          case 'NOR': {
+            const [res] = evaluateComponent({ ...comp, type: 'OR' }, inputs)
+            const port = comp.outputs[0]
+            return [maskValue(~toBig(res ?? 0n), port?.bitWidth || 1)]
+          }
+          case 'XOR': {
+            const port = comp.outputs[0]
+            const val = inputs.reduce(
+              (acc, cur) => acc ^ toBig(cur ?? 0n),
+              toBig(inputs[0] ?? 0n)
+            )
+            return [maskValue(val, port?.bitWidth || 1)]
+          }
+          case 'XNOR': {
+            const [res] = evaluateComponent({ ...comp, type: 'XOR' }, inputs)
+            const port = comp.outputs[0]
+            return [maskValue(~toBig(res ?? 0n), port?.bitWidth || 1)]
+          }
+          case 'SPLITTER': {
+            const inputVal = toBig(inputs[0] ?? 0n)
+            return comp.outputs.map((_, idx) =>
+              maskValue(inputVal >> BigInt(idx), 1)
+            )
+          }
+          case 'MERGER': {
+            let value = 0n
+            comp.inputs.forEach((_, idx) => {
+              if ((toBig(inputs[idx] ?? 0n) & 1n) === 1n) {
+                value |= 1n << BigInt(idx)
+              }
+            })
+            return [maskValue(value, comp.properties.busSize || 1)]
+          }
+          case 'DFF': {
+            const dVal = maskValue(inputs[0] ?? 0n, comp.outputs[0]?.bitWidth || 1)
+            const clk = inputs[1] ?? 0n
+            const rising = clk !== 0n && comp.lastClock === 0n
+            if (rising) {
+              comp.stateValue = dVal
+            }
+            comp.lastClock = clk
+            return [comp.stateValue ?? 0n]
+          }
+          case 'ROM': {
+            const mem = ensureMemory(comp)
+            const addr = calculateMemoryAddress(inputs[0], mem.length)
+            const byte = BigInt(mem[addr] || 0)
+            const width = comp.outputs[0]?.bitWidth || 8
+            return [maskValue(byte, width)]
+          }
+          case 'RAM': {
+            const mem = ensureMemory(comp)
+            const addr = calculateMemoryAddress(inputs[0], mem.length)
+            const dataIn = maskValue(inputs[1] ?? 0n, comp.properties.bitWidth || 8)
+            const we = inputs[2] ?? 0n
+            const clk = inputs[3] ?? 0n
+            const rising = clk !== 0n && comp.lastClock === 0n
+            if (rising && we !== 0n) {
+              const masked = Number(dataIn & BYTE_MASK_BIG)
+              mem[addr] = masked
+            }
+            comp.lastClock = clk
+            const byte = BigInt(mem[addr] || 0)
+            const width = comp.outputs[0]?.bitWidth || 8
+            return [maskValue(byte, width)]
+          }
+          case 'CLOCK': {
+            const period = Math.max(1, Math.floor(comp.properties.period || 2))
+            comp.clockPhase = (comp.clockPhase + 1) % period
+            const highFor = Math.max(1, Math.floor(period / 2))
+            const val = comp.clockPhase < highFor ? 1n : 0n
+            return [val]
+          }
+          case 'FSM': {
+            return evaluateFSMComponent(comp, inputs)
+          }
+          default: {
+            if (customLibrary[comp.type]) {
+              return evaluateCustomComponent(comp, inputs, context)
+            }
+            return []
+          }
+        }
+      }
+
+      function cloneCustomInstance(def, params = {}) {
+        const compMap = new Map()
+        const comps = def.components.map((c) => {
+          const props = { ...(c.properties || {}) }
+          if (typeof props.bitWidth === 'string') {
+            props.bitWidth = resolveParamValue(props.bitWidth, params)
+          }
+          if (typeof props.busSize === 'string') {
+            props.busSize = resolveParamValue(props.busSize, params)
+          }
+          props.parameters = { ...(props.parameters || {}), ...params }
+          const inst = new Component(c.gx, c.gy, c.type, props)
+          inst.id = c.id
+          compMap.set(c.id, inst)
+          return inst
+        })
+        const wList = def.wires.map((w) => ({
+          ...w,
+          value: 0n,
+          frameToggles: 0,
+        }))
+        return { components: comps, wires: wList }
+      }
+
+      function evaluateCustomComponent(comp, inputs, parentContext) {
+        const def = customLibrary[comp.type]
+        if (!def) return []
+        if (!comp.subInstance) {
+          comp.subInstance = cloneCustomInstance(def, comp.parameters || def.parameters || {})
+        }
+        const sub = comp.subInstance
+        // inject inputs into mapped internal INPUT components
+        def.inputs.forEach((p, idx) => {
+          const target = sub.components.find((c) => c.id === p.componentId)
+          if (target) target.overrideValue = inputs[idx] ?? 0n
+        })
+        runTickFor(sub.components, sub.wires)
+        sub.wires.forEach((wire) => {
+          const dest = sub.components.find((c) => c.id === wire.toCompId)
+          const port = dest?.inputs.find((p) => p.id === wire.toPortId)
+          if (port) port.value = wire.value
+        })
+        const outputs = def.outputs.map((p) => {
+          const outComp = sub.components.find((c) => c.id === p.componentId)
+          if (!outComp) return 0n
+          const wire = sub.wires.find(
+            (w) => w.toCompId === outComp.id && w.toPortId === 'in'
+          )
+          // fallback to the input buffer only when no wire connects (keeps legacy single-port OUTPUT defs working)
+          const val = wire ? wire.value : outComp.inputs.find((i) => i.id === 'in')?.value
+          return maskValue(val ?? 0n, p.bitWidth || outComp.inputs[0]?.bitWidth || 1)
+        })
+        return outputs
+      }
+
+      function stopTickLoop() {
+        if (tickTimer) {
+          clearInterval(tickTimer)
+          tickTimer = null
+        }
+      }
+
+      function setTickRate(hz) {
+        const clamped = Math.max(1, Math.min(240, Math.floor(hz || 1)))
+        ticksPerSecond = clamped
+        startTickLoop()
+        refreshHUD()
+      }
+
+      function startTickLoop() {
+        stopTickLoop()
+        tickTimer = setInterval(() => {
+          if (!isPaused) tickOnce()
+        }, 1000 / ticksPerSecond)
+      }
+
+      function pauseSimulation() {
+        isPaused = true
+        refreshHUD()
+      }
+
+      function resumeSimulation() {
+        isPaused = false
+        lastBreakpointHit = null
+        refreshHUD()
+      }
+
+      function togglePause() {
+        isPaused = !isPaused
+        refreshHUD()
+      }
+
+      function stepSimulation(count = 1) {
+        const prev = isPaused
+        isPaused = true
+        tick(count)
+        isPaused = !!lastBreakpointHit || prev
+      }
+
+      function normalizeTestbenchSequence(input) {
+        if (!input) return []
+        if (typeof input === 'string') {
+          const trimmed = input.trim()
+          if (!trimmed) return []
+          return JSON.parse(trimmed)
+        }
+        if (Array.isArray(input)) return input
+        return []
+      }
+
+      function applyInputValue(id, value) {
+        const comp = components.find((c) => c.id === id && c.type === 'INPUT')
+        if (!comp) return false
+        comp.state = Boolean(value)
+        if (value === null || value === undefined) {
+          comp.overrideValue = null
+        } else {
+          comp.overrideValue = BigInt(value)
+        }
+        scheduledComponents.delete(comp.id)
+        queueComponent(comp, 0)
+        return true
+      }
+
+      function readTestSignal(id) {
+        const comp = components.find((c) => c.id === id)
+        if (!comp) return null
+        if (comp.inputs.length) return comp.inputs[0].value ?? null
+        if (comp.outputs.length) return comp.outputs[0].value ?? null
+        return null
+      }
+
+      function runTestbench(sequence) {
+        const steps = normalizeTestbenchSequence(sequence ?? testbench.script)
+        testbench.stopRequested = false
+        testbench.running = true
+        const prevPaused = isPaused
+        pauseSimulation()
+        resetSimulationClock()
+        seedInitialEvents()
+        let maxTick = 0
+        steps.forEach((s) => {
+          if (typeof s?.at === 'number') maxTick = Math.max(maxTick, s.at)
+        })
+        const failures = []
+        for (let t = 0; t <= maxTick; t++) {
+          if (testbench.stopRequested) break
+          steps
+            .filter((s) => s.at === t && s.set)
+            .forEach((s) => {
+              Object.entries(s.set || {}).forEach(([id, val]) => {
+                applyInputValue(id, val)
+              })
+            })
+          scheduledComponents.clear()
+          eventQueue.length = 0
+          runTickFor(components, wires)
+          runTickFor(components, wires)
+          wires.forEach((wire) => {
+            const dest = components.find((c) => c.id === wire.toCompId)
+            const port = dest?.inputs.find((p) => p.id === wire.toPortId)
+            if (port) port.value = wire.value
+          })
+          simTime += 1
+          steps
+            .filter((s) => s.at === t && s.expect)
+            .forEach((s) => {
+              Object.entries(s.expect || {}).forEach(([id, val]) => {
+                const actual = readTestSignal(id)
+                const expected = val === null || val === undefined ? null : BigInt(val)
+                if (actual === null || actual === undefined) {
+                  failures.push({ tick: t, id, expected, actual: null })
+                } else if (expected !== null && BigInt(actual) !== expected) {
+                  failures.push({ tick: t, id, expected, actual })
+                }
+              })
+            })
+          if (testbench.stopRequested) break
+        }
+        testbench.running = false
+        const passed = !testbench.stopRequested && failures.length === 0
+        testbench.lastResult = {
+          passed,
+          failures,
+          ticks: maxTick + 1,
+          stopped: testbench.stopRequested,
+        }
+        if (!prevPaused) resumeSimulation()
+        return testbench.lastResult
+      }
+
+      function stopTestbench() {
+        testbench.stopRequested = true
+        testbench.running = false
+      }
+
+      function setTestbenchScript(seq) {
+        const parsed = normalizeTestbenchSequence(seq)
+        testbench.script = JSON.stringify(parsed, null, 2)
+        return parsed
+      }
+
+      function getTestbenchStatus() {
+        return {
+          running: testbench.running,
+          lastResult: testbench.lastResult,
+          script: testbench.script,
+        }
+      }
+
+      function getGrid(clientPos) {
+        const scene = clientToScene(clientPos)
+        return {
+          x: Math.floor((scene.x - camera.x) / GRID_SIZE),
+          y: Math.floor((scene.y - camera.y) / GRID_SIZE),
+        }
+      }
+
+      function drawGrid() {
+        const width = canvas.width / viewScale
+        const height = canvas.height / viewScale
+        ctx.strokeStyle = '#1f1f1f'
+        ctx.lineWidth = 1
+
+        const startX = ((-camera.x / GRID_SIZE) | 0) * GRID_SIZE + camera.x
+        const startY = ((-camera.y / GRID_SIZE) | 0) * GRID_SIZE + camera.y
+
+        for (let x = startX; x < width; x += GRID_SIZE) {
+          ctx.beginPath()
+          ctx.moveTo(x, 0)
+          ctx.lineTo(x, height)
+          ctx.stroke()
+        }
+
+        for (let y = startY; y < height; y += GRID_SIZE) {
+          ctx.beginPath()
+          ctx.moveTo(0, y)
+          ctx.lineTo(width, y)
+          ctx.stroke()
+        }
+      }
+
+      function drawBadge(x, y, text, color) {
+        const pad = 6
+        ctx.fillStyle = color
+        ctx.strokeStyle = '#0f0f0f'
+        ctx.lineWidth = 1
+        const width = ctx.measureText(text).width + pad * 2
+        const height = 16
+        const rx = 6
+        const left = x - width / 2
+        const top = y - height / 2
+        ctx.beginPath()
+        ctx.moveTo(left + rx, top)
+        ctx.lineTo(left + width - rx, top)
+        ctx.quadraticCurveTo(left + width, top, left + width, top + rx)
+        ctx.lineTo(left + width, top + height - rx)
+        ctx.quadraticCurveTo(
+          left + width,
+          top + height,
+          left + width - rx,
+          top + height
+        )
+        ctx.lineTo(left + rx, top + height)
+        ctx.quadraticCurveTo(left, top + height, left, top + height - rx)
+        ctx.lineTo(left, top + rx)
+        ctx.quadraticCurveTo(left, top, left + rx, top)
+        ctx.closePath()
+        ctx.fill()
+        ctx.stroke()
+        ctx.fillStyle = '#fff'
+        ctx.font = '10px "JetBrains Mono"'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(text, x, y)
+      }
+
+      function wireColor(wire) {
+        return wire.bitWidth > 7 ? '#f97316' : '#3b82f6'
+      }
+
+      function applyAutoRoute(wire) {
+        const fromComp = components.find((c) => c.id === wire.fromCompId)
+        const toComp = components.find((c) => c.id === wire.toCompId)
+        if (!fromComp || !toComp) return
+        const fromPort = fromComp.outputs.find((p) => p.id === wire.fromPortId)
+        const toPort = toComp.inputs.find((p) => p.id === wire.toPortId)
+        if (!fromPort || !toPort) return
+        const start = {
+          x: fromComp.gx + fromPort.relativeX,
+          y: fromComp.gy + fromPort.relativeY,
+        }
+        const end = { x: toComp.gx + toPort.relativeX, y: toComp.gy + toPort.relativeY }
+        // Use a simple orthogonal L-shaped route to keep paths grid-aligned
+        const path = [
+          { x: start.x, y: start.y },
+          { x: start.x, y: end.y },
+          { x: end.x, y: end.y },
+        ]
+        wire.path = path
+        wire.pathIsGrid = true
+      }
+
+      function rerouteForComponent(comp) {
+        wires.forEach((w) => {
+          if (w.fromCompId === comp.id || w.toCompId === comp.id) {
+            applyAutoRoute(w)
+          }
+        })
+      }
+
+      function drawWires() {
+        wires.forEach((wire) => {
+          drawWire(wire)
+        })
+
+        if (draggingWireStart) {
+          const start = portPosition(
+            draggingWireStart.component,
+            draggingWireStart.port
+          )
+          const end = hoverPort
+            ? portPosition(hoverPort.component, hoverPort.port)
+            : {
+                x: mouseGrid.x * GRID_SIZE + camera.x,
+                y: mouseGrid.y * GRID_SIZE + camera.y,
+              }
+          ctx.strokeStyle = '#888'
+          ctx.lineWidth = 2
+          ctx.beginPath()
+          ctx.moveTo(start.x, start.y)
+          ctx.lineTo(end.x, end.y)
+          ctx.stroke()
+        }
+        drawProbes()
+      }
+
+      function drawWire(wire) {
+        const fromComp = components.find((c) => c.id === wire.fromCompId)
+        const toComp = components.find((c) => c.id === wire.toCompId)
+        if (!fromComp || !toComp) return
+        const fromPort = fromComp.outputs.find((p) => p.id === wire.fromPortId)
+        const toPort = toComp.inputs.find((p) => p.id === wire.toPortId)
+        if (!fromPort || !toPort) return
+        const start = portPosition(fromComp, fromPort)
+        const end = portPosition(toComp, toPort)
+        const active = wire.value !== 0n
+        const toggled = (wire.frameToggles || 0) > 1
+
+        if (coverageEnabled) {
+          const delta = wire.frameToggles || 0
+          if (delta > 0 || !coverageStats.has(wire.id)) {
+            coverageStats.set(wire.id, (coverageStats.get(wire.id) || 0) + delta)
+          }
+        }
+
+        const coverageHits = coverageStats.get(wire.id) || 0
+        const baseColor = coverageEnabled
+          ? coverageHits === 0
+            ? '#4b5563'
+            : coverageHits > 10
+              ? '#ef4444'
+              : '#22c55e'
+          : toggled
+            ? '#a855f7'
+            : active
+              ? '#fffa8b'
+              : wireColor(wire)
+
+        ctx.strokeStyle = baseColor
+        const baseWidth = wire.bundle ? 4 : 2
+        ctx.lineWidth = toggled || active || coverageEnabled ? baseWidth + 1 : baseWidth
+        if (wire.showFlow) {
+          ctx.setLineDash([12, 10])
+          ctx.lineDashOffset = -flowOffset
+        }
+        ctx.lineCap = 'round'
+        ctx.beginPath()
+        const rawPoints =
+          Array.isArray(wire.path) && wire.path.length ? wire.path : [start, end]
+        const pathPoints = rawPoints.map((p) =>
+          wire.pathIsGrid
+            ? { x: p.x * GRID_SIZE + camera.x, y: p.y * GRID_SIZE + camera.y }
+            : p
+        )
+        ctx.moveTo(pathPoints[0].x, pathPoints[0].y)
+        for (let i = 1; i < pathPoints.length; i++) {
+          ctx.lineTo(pathPoints[i].x, pathPoints[i].y)
+        }
+        ctx.stroke()
+        if (wire.showFlow) {
+          ctx.setLineDash([])
+          ctx.lineDashOffset = 0
+        }
+
+        if (wire.bitWidth > 1) {
+          const midX = (start.x + end.x) / 2
+          const midY = (start.y + end.y) / 2
+          drawBadge(midX, midY, `${wire.bitWidth}`, wireColor(wire))
+          if (wire.bundle) {
+            drawBadge(midX, midY - 16, `${wire.bundle}`, '#8b5cf6')
+          }
+        } else if (wire.bundle) {
+          const midX = (start.x + end.x) / 2
+          const midY = (start.y + end.y) / 2
+          drawBadge(midX, midY - 12, `${wire.bundle}`, '#8b5cf6')
+        }
+        wire.frameToggles = 0
+      }
+
+      function toggleProbe(wire) {
+        if (!wire) return
+        if (probes.has(wire.id)) {
+          probes.delete(wire.id)
+        } else {
+          probes.set(wire.id, { history: [wire.value] })
+        }
+      }
+
+      function drawProbes() {
+        probes.forEach((probe, id) => {
+          const wire = wires.find((w) => w.id === id)
+          if (!wire) return
+          const fromComp = components.find((c) => c.id === wire.fromCompId)
+          const toComp = components.find((c) => c.id === wire.toCompId)
+          if (!fromComp || !toComp) return
+          const fromPort = fromComp.outputs.find((p) => p.id === wire.fromPortId)
+          const toPort = toComp.inputs.find((p) => p.id === wire.toPortId)
+          if (!fromPort || !toPort) return
+          const start = portPosition(fromComp, fromPort)
+          const end = portPosition(toComp, toPort)
+          const midX = (start.x + end.x) / 2
+          const midY = (start.y + end.y) / 2
+          const lastVal = probe.history[probe.history.length - 1] ?? wire.value
+          const boxW = 90
+          const boxH = 34
+          ctx.save()
+          ctx.fillStyle = 'rgba(15,23,42,0.9)'
+          ctx.strokeStyle = '#94a3b8'
+          ctx.lineWidth = 1
+          ctx.fillRect(midX - boxW / 2, midY - boxH / 2, boxW, boxH)
+          ctx.strokeRect(midX - boxW / 2, midY - boxH / 2, boxW, boxH)
+          ctx.fillStyle = '#e5e7eb'
+          ctx.font = '10px "JetBrains Mono"'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(`0x${lastVal.toString(16)}`, midX, midY - 6)
+          const hist = probe.history.slice(-20)
+          if (hist.length) {
+            ctx.strokeStyle = '#38bdf8'
+            ctx.beginPath()
+            hist.forEach((v, idx) => {
+              const x = midX - boxW / 2 + 6 + (idx / Math.max(1, hist.length - 1)) * (boxW - 12)
+              const y = midY + boxH / 2 - 8 - (Number(v !== 0n) * 10)
+              if (idx === 0) ctx.moveTo(x, y)
+              else ctx.lineTo(x, y)
+            })
+            ctx.stroke()
+          }
+          ctx.restore()
+        })
+      }
+
+      function sampleProbes() {
+        probes.forEach((probe, id) => {
+          const wire = wires.find((w) => w.id === id)
+          if (!wire) return
+          const val = wire.value ?? 0n
+          if (!logicAnalyzer.triggered) {
+            if (logicAnalyzer.triggerWire === id && val !== 0n) {
+              logicAnalyzer.triggered = true
+            } else {
+              return
+            }
+          }
+          probe.history.push(val)
+          if (probe.history.length > logicAnalyzer.maxSamples) {
+            probe.history.shift()
+          }
+        })
+      }
+
+      function drawLogicAnalyzer() {
+        laCanvas.style.display = logicAnalyzer.enabled ? 'block' : 'none'
+        if (!logicAnalyzer.enabled) return
+        const canvasWidth = laCanvas.clientWidth || window.innerWidth - HUD_OFFSET
+        laCanvas.width = canvasWidth
+        laCanvas.height = laCanvas.clientHeight || 140
+        laCtx.fillStyle = '#0a0a0f'
+        laCtx.fillRect(0, 0, laCanvas.width, laCanvas.height)
+        const entries = Array.from(probes.entries())
+        const rowHeight = 24
+        const marginTop = 12
+        entries.slice(0, Math.floor((laCanvas.height - marginTop) / rowHeight)).forEach(([id, probe], idx) => {
+          const yMid = marginTop + idx * rowHeight + rowHeight / 2
+          const data = probe.history
+          if (!data.length) return
+          laCtx.strokeStyle = logicAnalyzer.triggerWire === id ? '#22d3ee' : '#94a3b8'
+          laCtx.beginPath()
+          data.forEach((v, i) => {
+            const x = (i / Math.max(1, logicAnalyzer.maxSamples - 1)) * laCanvas.width
+            const high = v !== 0n
+            const y = high ? yMid - 6 : yMid + 6
+            if (i === 0) laCtx.moveTo(x, y)
+            else laCtx.lineTo(x, y)
+          })
+          laCtx.stroke()
+          laCtx.fillStyle = '#e5e7eb'
+          laCtx.font = '10px "JetBrains Mono"'
+          laCtx.textAlign = 'left'
+          laCtx.fillText(id, 6, yMid + 10)
+        })
+      }
+
+      function computeWorldBounds() {
+        let minX = 0
+        let minY = 0
+        let maxX = 10
+        let maxY = 10
+        if (components.length) {
+          minX = Math.min(...components.map((c) => c.gx))
+          minY = Math.min(...components.map((c) => c.gy))
+          maxX = Math.max(...components.map((c) => c.gx + c.w))
+          maxY = Math.max(...components.map((c) => c.gy + c.h))
+        }
+        wires.forEach((w) => {
+          if (Array.isArray(w.path) && w.path.length) {
+            w.path.forEach((p) => {
+              minX = Math.min(minX, p.x)
+              minY = Math.min(minY, p.y)
+              maxX = Math.max(maxX, p.x)
+              maxY = Math.max(maxY, p.y)
+            })
+          }
+        })
+        return { minX, minY, maxX, maxY }
+      }
+
+      function drawMinimap() {
+        const width = minimapCanvas.clientWidth || 200
+        const height = minimapCanvas.clientHeight || 200
+        minimapCanvas.width = width
+        minimapCanvas.height = height
+        minimapCtx.fillStyle = '#0b0b0b'
+        minimapCtx.fillRect(0, 0, width, height)
+        minimapCtx.strokeStyle = '#222'
+        minimapCtx.strokeRect(0, 0, width, height)
+
+        const bounds = computeWorldBounds()
+        const spanX = Math.max(1, bounds.maxX - bounds.minX)
+        const spanY = Math.max(1, bounds.maxY - bounds.minY)
+        const pad = 2
+        const scale = Math.min(
+          (width - pad * 2) / spanX,
+          (height - pad * 2) / spanY
+        )
+
+        const toMini = (gx, gy) => ({
+          x: (gx - bounds.minX) * scale + pad,
+          y: (gy - bounds.minY) * scale + pad,
+        })
+
+        wires.forEach((w) => {
+          minimapCtx.strokeStyle = '#334155'
+          minimapCtx.lineWidth = 1
+          const fromComp = components.find((c) => c.id === w.fromCompId)
+          const toComp = components.find((c) => c.id === w.toCompId)
+          const fromPort = getPort(w.fromCompId, w.fromPortId)
+          const toPort = getPort(w.toCompId, w.toPortId)
+          const pts =
+            Array.isArray(w.path) && w.path.length
+              ? w.path
+              : [
+                  {
+                    x: w.fromCompId
+                      ? (fromPort?.relativeX || 0) + (fromComp?.gx || 0)
+                      : 0,
+                    y: w.fromCompId
+                      ? (fromPort?.relativeY || 0) + (fromComp?.gy || 0)
+                      : 0,
+                  },
+                  {
+                    x: w.toCompId ? (toPort?.relativeX || 0) + (toComp?.gx || 0) : 0,
+                    y: w.toCompId ? (toPort?.relativeY || 0) + (toComp?.gy || 0) : 0,
+                  },
+                ]
+          minimapCtx.beginPath()
+          const first = toMini(pts[0].x, pts[0].y)
+          minimapCtx.moveTo(first.x, first.y)
+          pts.forEach((p) => {
+            const pt = toMini(p.x, p.y)
+            minimapCtx.lineTo(pt.x, pt.y)
+          })
+          minimapCtx.stroke()
+        })
+
+        components.forEach((c) => {
+          const pos = toMini(c.gx, c.gy)
+          minimapCtx.fillStyle = '#1f2937'
+          minimapCtx.strokeStyle = '#475569'
+          minimapCtx.lineWidth = 1
+          minimapCtx.fillRect(pos.x, pos.y, c.w * scale, c.h * scale)
+          minimapCtx.strokeRect(pos.x, pos.y, c.w * scale, c.h * scale)
+        })
+
+        const viewW = (canvas.width / viewScale) / GRID_SIZE
+        const viewH = (canvas.height / viewScale) / GRID_SIZE
+        const viewX = -camera.x / GRID_SIZE
+        const viewY = -camera.y / GRID_SIZE
+        const tl = toMini(viewX, viewY)
+        minimapCtx.strokeStyle = '#22d3ee'
+        minimapCtx.lineWidth = 1.5
+        minimapCtx.strokeRect(tl.x, tl.y, viewW * scale, viewH * scale)
+      }
+
+      function minimapToWorld(event) {
+        const rect = minimapCanvas.getBoundingClientRect()
+        const bounds = computeWorldBounds()
+        const spanX = Math.max(1, bounds.maxX - bounds.minX)
+        const spanY = Math.max(1, bounds.maxY - bounds.minY)
+        const pad = 2
+        const scale = Math.min(
+          (minimapCanvas.clientWidth - pad * 2) / spanX,
+          (minimapCanvas.clientHeight - pad * 2) / spanY
+        )
+        const x = (event.clientX - rect.left - pad) / scale + bounds.minX
+        const y = (event.clientY - rect.top - pad) / scale + bounds.minY
+        return { gx: x, gy: y }
+      }
+
+      function centerCameraOnGrid(gx, gy) {
+        const worldX = gx * GRID_SIZE
+        const worldY = gy * GRID_SIZE
+        camera.x = canvas.width / (2 * viewScale) - worldX
+        camera.y = canvas.height / (2 * viewScale) - worldY
+      }
+
+      function handleMinimapNav(event) {
+        const target = minimapToWorld(event)
+        centerCameraOnGrid(target.gx, target.gy)
+      }
+
+      function zoomToSelection() {
+        const pool = selectedComponents.length ? selectedComponents : components
+        if (!pool.length) return
+        const minX = Math.min(...pool.map((c) => c.gx))
+        const minY = Math.min(...pool.map((c) => c.gy))
+        const maxX = Math.max(...pool.map((c) => c.gx + c.w))
+        const maxY = Math.max(...pool.map((c) => c.gy + c.h))
+        const sizeX = Math.max(1, maxX - minX)
+        const sizeY = Math.max(1, maxY - minY)
+        const desired = Math.min(
+          canvas.width / (sizeX * GRID_SIZE * 1.2),
+          canvas.height / (sizeY * GRID_SIZE * 1.2)
+        )
+        setZoom(desired)
+        centerCameraOnGrid(minX + sizeX / 2, minY + sizeY / 2)
+      }
+
+      function drawPort(comp, port) {
+        const def = TOOLS[comp.type]
+        const pos = portPosition(comp, port)
+        const active = port.value !== 0n
+        ctx.beginPath()
+        ctx.fillStyle = '#0d0d0d'
+        ctx.strokeStyle = def.color
+        ctx.lineWidth = 2
+        ctx.arc(pos.x, pos.y, PORT_RADIUS, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.stroke()
+        if (active) {
+          ctx.fillStyle = '#fffa8b'
+          ctx.beginPath()
+          ctx.arc(pos.x, pos.y, PORT_RADIUS - 3, 0, Math.PI * 2)
+          ctx.fill()
+        }
+        if (hoverPort && hoverPort.component === comp && hoverPort.port === port) {
+          ctx.strokeStyle = '#fff'
+          ctx.lineWidth = 1
+          ctx.beginPath()
+          ctx.arc(pos.x, pos.y, PORT_RADIUS + 2, 0, Math.PI * 2)
+          ctx.stroke()
+        }
+        if (port.bitWidth > 1) {
+          drawBadge(
+            pos.x + (port.type === 'OUT' ? 16 : -16),
+            pos.y,
+            `${port.bitWidth}`,
+            wireColor({ bitWidth: port.bitWidth })
+          )
+        }
+      }
+
+      function drawComponent(comp, isGhost = false) {
+        const def = TOOLS[comp.type]
+        const x = comp.gx * GRID_SIZE + camera.x
+        const y = comp.gy * GRID_SIZE + camera.y
+        const w = comp.w * GRID_SIZE
+        const h = comp.h * GRID_SIZE
+
+        ctx.save()
+        if (isGhost) ctx.globalAlpha = 0.6
+        ctx.fillStyle = selectedComponents.includes(comp) ? '#111827' : '#000'
+        ctx.fillRect(x, y, w, h)
+        ctx.strokeStyle = def.color
+        ctx.lineWidth = 2
+        ctx.strokeRect(x, y, w, h)
+
+        ctx.fillStyle = def.color
+        ctx.font = 'bold 12px "JetBrains Mono"'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+
+        if (comp.type === 'INPUT') {
+          const pad = 8
+          ctx.fillStyle = '#000'
+          ctx.fillRect(x + pad, y + pad, w - pad * 2, h - pad * 2)
+          const onText = comp.state ? 'ON' : 'OFF'
+          ctx.fillStyle = comp.state ? '#4f4' : '#333'
+          ctx.fillRect(
+            x + pad + 2,
+            y + pad + 2,
+            w - pad * 2 - 4,
+            h - pad * 2 - 4
+          )
+          ctx.fillStyle = '#fff'
+          ctx.fillText(
+            `${onText} x${comp.properties.bitWidth}`,
+            x + w / 2,
+            y + h / 2
+          )
+        } else if (comp.type === 'OUTPUT') {
+          ctx.beginPath()
+          ctx.arc(x + w / 2, y + h / 2, 12, 0, Math.PI * 2)
+          ctx.fillStyle = '#000'
+          ctx.fill()
+          ctx.beginPath()
+          ctx.arc(x + w / 2, y + h / 2, 8, 0, Math.PI * 2)
+          if (comp.isLit) {
+            ctx.fillStyle = '#ffff00'
+            ctx.shadowColor = '#ffff00'
+            ctx.shadowBlur = 20
+          } else {
+            ctx.fillStyle = '#333'
+          }
+          ctx.fill()
+          ctx.shadowBlur = 0
+          ctx.fillStyle = def.color
+          ctx.fillText(`OUT x${comp.properties.bitWidth}`, x + w / 2, y + h - 12)
+        } else {
+          ctx.fillText(def.label, x + w / 2, y + h / 2)
+          if (comp.properties.bitWidth) {
+            ctx.fillStyle = '#888'
+            ctx.font = '10px "JetBrains Mono"'
+            ctx.fillText(`x${comp.properties.bitWidth}`, x + w / 2, y + h - 12)
+          }
+          if (comp.type === 'FSM') {
+            const fsm = normalizeFsmDefinition(comp.properties.fsm)
+            const count = Math.min(4, fsm.states.length)
+            const radius = 10
+            for (let i = 0; i < count; i++) {
+              const angle = (i / count) * Math.PI * 2
+              const cx = x + w / 2 + Math.cos(angle) * 18
+              const cy = y + h / 2 + Math.sin(angle) * 12
+              ctx.beginPath()
+              ctx.fillStyle =
+                fsm.states[i]?.id === comp.fsmState ? '#22d3ee' : '#111827'
+              ctx.strokeStyle = '#22d3ee'
+              ctx.lineWidth = 1
+              ctx.arc(cx, cy, radius, 0, Math.PI * 2)
+              ctx.fill()
+              ctx.stroke()
+              ctx.fillStyle = '#e5e7eb'
+              ctx.font = '9px "JetBrains Mono"'
+              ctx.fillText(fsm.states[i]?.id || `S${i}`, cx, cy)
+            }
+          }
+          if (comp.type === 'SPLITTER' || comp.type === 'MERGER') {
+            ctx.fillStyle = '#888'
+            ctx.font = '10px "JetBrains Mono"'
+            ctx.fillText(`${comp.properties.busSize}-bit`, x + w / 2, y + 14)
+          }
+        }
+
+        comp.inputs.forEach((p) => drawPort(comp, p))
+        comp.outputs.forEach((p) => drawPort(comp, p))
+
+        ctx.restore()
+      }
+
+      function drawAllComponents() {
+        components.forEach((c) => drawComponent(c))
+        if (placingType && TOOLS[placingType]) {
+          drawComponent(
+            new Component(mouseGrid.x, mouseGrid.y, placingType),
+            true
+          )
+        } else if (placingType && customLibrary[placingType]) {
+          const x = mouseGrid.x * GRID_SIZE + camera.x
+          const y = mouseGrid.y * GRID_SIZE + camera.y
+          const w = GRID_SIZE * 3
+          const h = GRID_SIZE * 2
+          ctx.save()
+          ctx.globalAlpha = 0.6
+          ctx.fillStyle = '#0f172a'
+          ctx.strokeStyle = '#6ee7b7'
+          ctx.lineWidth = 2
+          ctx.fillRect(x, y, w, h)
+          ctx.strokeRect(x, y, w, h)
+          ctx.fillStyle = '#6ee7b7'
+          ctx.font = 'bold 12px "JetBrains Mono"'
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(placingType, x + w / 2, y + h / 2)
+          ctx.restore()
+        }
+      }
+
+      function render() {
+        if (lastViewScale !== viewScale) {
+          ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0)
+          lastViewScale = viewScale
+        }
+        const sceneWidth = canvas.width / viewScale
+        const sceneHeight = canvas.height / viewScale
+        ctx.fillStyle = '#0f0f0f'
+        ctx.fillRect(0, 0, sceneWidth, sceneHeight)
+        flowOffset = (flowOffset + 2) % 1000
+        drawGrid()
+        drawWires()
+        drawAllComponents()
+        drawLogicAnalyzer()
+        if (selectionStart && selectionEnd) {
+          const sx = Math.min(selectionStart.x, selectionEnd.x) * GRID_SIZE + camera.x
+          const sy = Math.min(selectionStart.y, selectionEnd.y) * GRID_SIZE + camera.y
+          const ex = (Math.max(selectionStart.x, selectionEnd.x) + 1) * GRID_SIZE + camera.x
+          const ey = (Math.max(selectionStart.y, selectionEnd.y) + 1) * GRID_SIZE + camera.y
+          ctx.strokeStyle = '#fff'
+          ctx.lineWidth = 1
+          ctx.setLineDash([5, 5])
+          ctx.strokeRect(sx, sy, ex - sx, ey - sy)
+          ctx.setLineDash([])
+          ctx.fillStyle = 'rgba(255,255,255,0.08)'
+          ctx.fillRect(sx, sy, ex - sx, ey - sy)
+        }
+        requestAnimationFrame(render)
+        drawMinimap()
+      }
+
+      function refreshHUD() {
+        hud.innerHTML = ''
+
+        if (currentContext.type === 'custom') {
+          const crumb = document.createElement('button')
+          crumb.className = 'action'
+          crumb.innerText = `Exit ${currentContext.name}`
+          crumb.onclick = exitCustomEdit
+          hud.appendChild(crumb)
+        }
+
+        const modalBtn = document.createElement('button')
+        modalBtn.className = 'action'
+        modalBtn.innerText = 'Save / Load'
+        modalBtn.onclick = () => openModal('save')
+        hud.appendChild(modalBtn)
+
+        const verilogBtn = document.createElement('button')
+        verilogBtn.className = 'action'
+        verilogBtn.id = 'btn-export-verilog'
+        verilogBtn.innerText = 'Export Verilog'
+        verilogBtn.onclick = () => downloadVerilog()
+        hud.appendChild(verilogBtn)
+
+        const spotlightBtn = document.createElement('button')
+        spotlightBtn.className = 'action'
+        spotlightBtn.innerText = 'Spotlight (Ctrl+K)'
+        spotlightBtn.onclick = () => openSpotlight()
+        hud.appendChild(spotlightBtn)
+
+        const pauseBtn = document.createElement('button')
+        pauseBtn.className = 'action'
+        pauseBtn.innerText = isPaused ? 'Resume' : 'Pause'
+        pauseBtn.onclick = togglePause
+        hud.appendChild(pauseBtn)
+
+        const stepBtn = document.createElement('button')
+        stepBtn.className = isPaused ? 'action' : 'action disabled'
+        stepBtn.innerText = 'Step (1 Tick)'
+        stepBtn.disabled = !isPaused
+        stepBtn.onclick = () => stepSimulation(1)
+        hud.appendChild(stepBtn)
+
+        const bpLabel = document.createElement('div')
+        bpLabel.style.fontSize = '11px'
+        bpLabel.style.color = '#cbd5f5'
+        bpLabel.textContent = 'Conditional Breakpoints'
+        hud.appendChild(bpLabel)
+        const bpRow = document.createElement('div')
+        bpRow.style.display = 'flex'
+        bpRow.style.gap = '6px'
+        const bpInput = document.createElement('input')
+        bpInput.className = 'themed-input'
+        bpInput.placeholder = 'PC==0xA0'
+        bpInput.style.flex = '1'
+        const bpAdd = document.createElement('button')
+        bpAdd.className = 'action'
+        bpAdd.innerText = 'Add BP'
+        bpAdd.onclick = () => {
+          if (bpInput.value.trim()) {
+            addBreakpoint(bpInput.value.trim())
+            bpInput.value = ''
+            refreshHUD()
+          }
+        }
+        bpRow.appendChild(bpInput)
+        bpRow.appendChild(bpAdd)
+        hud.appendChild(bpRow)
+
+        const bpList = document.createElement('div')
+        bpList.id = 'breakpoint-list'
+        bpList.style.display = 'flex'
+        bpList.style.flexDirection = 'column'
+        bpList.style.gap = '4px'
+        listBreakpoints().forEach((bp) => {
+          const row = document.createElement('div')
+          row.style.display = 'flex'
+          row.style.alignItems = 'center'
+          row.style.gap = '6px'
+          row.style.padding = '6px'
+          row.style.border = '1px solid #222'
+          row.style.borderRadius = '4px'
+          if (bp.hitAt !== null) row.classList.add('hit')
+          row.style.background = bp.hitAt !== null ? '#1f2937' : '#0b0b0b'
+          const enable = document.createElement('input')
+          enable.type = 'checkbox'
+          enable.checked = bp.enabled
+          enable.onchange = (e) => {
+            setBreakpointEnabled(bp.id, e.target.checked)
+            refreshHUD()
+          }
+          const text = document.createElement('span')
+          text.textContent = bp.expr
+          text.style.flex = '1'
+          text.style.fontSize = '11px'
+          text.style.color = '#e5e7eb'
+          const meta = document.createElement('span')
+          meta.style.fontSize = '10px'
+          meta.style.color = '#94a3b8'
+          meta.textContent = bp.hitAt !== null ? `hit@${bp.hitAt}` : 'idle'
+          const removeBtn = document.createElement('button')
+          removeBtn.innerText = '✕'
+          removeBtn.onclick = () => {
+            removeBreakpoint(bp.id)
+            refreshHUD()
+          }
+          row.appendChild(enable)
+          row.appendChild(text)
+          row.appendChild(meta)
+          row.appendChild(removeBtn)
+          bpList.appendChild(row)
+        })
+        hud.appendChild(bpList)
+
+        const undoBtn = document.createElement('button')
+        undoBtn.className = 'action'
+        undoBtn.innerText = 'Undo'
+        undoBtn.disabled = historyIndex <= 0
+        undoBtn.onclick = undoEdit
+        hud.appendChild(undoBtn)
+
+        const redoBtn = document.createElement('button')
+        redoBtn.className = 'action'
+        redoBtn.innerText = 'Redo'
+        redoBtn.disabled = historyIndex >= historyStack.length - 1
+        redoBtn.onclick = redoEdit
+        hud.appendChild(redoBtn)
+
+        const speedWrap = document.createElement('div')
+        speedWrap.style.display = 'flex'
+        speedWrap.style.flexDirection = 'column'
+        speedWrap.style.gap = '4px'
+        const speedLabel = document.createElement('span')
+        speedLabel.style.fontSize = '11px'
+        speedLabel.style.color = '#aaa'
+        speedLabel.innerText = `Speed: ${ticksPerSecond} Hz`
+        const speedInput = document.createElement('input')
+        speedInput.type = 'range'
+        speedInput.className = 'themed-input'
+        speedInput.min = '1'
+        speedInput.max = '240'
+        speedInput.value = `${ticksPerSecond}`
+        speedInput.oninput = (e) => setTickRate(Number(e.target.value))
+        speedWrap.appendChild(speedLabel)
+        speedWrap.appendChild(speedInput)
+        hud.appendChild(speedWrap)
+
+        const zoomWrap = document.createElement('div')
+        zoomWrap.style.display = 'flex'
+        zoomWrap.style.flexDirection = 'column'
+        zoomWrap.style.gap = '4px'
+        const zoomLabel = document.createElement('span')
+        zoomLabel.style.fontSize = '11px'
+        zoomLabel.style.color = '#aaa'
+        zoomLabel.innerText = `Zoom: ${(viewScale * 100).toFixed(0)}%`
+        const zoomInput = document.createElement('input')
+        zoomInput.type = 'range'
+        zoomInput.className = 'themed-input'
+        zoomInput.min = `${MIN_ZOOM * 100}`
+        zoomInput.max = `${MAX_ZOOM * 100}`
+        zoomInput.value = `${viewScale * 100}`
+        zoomInput.oninput = (e) => {
+          setZoom(Number(e.target.value) / 100)
+          zoomLabel.innerText = `Zoom: ${(viewScale * 100).toFixed(0)}%`
+        }
+        const zoomFit = document.createElement('button')
+        zoomFit.className = 'action'
+        zoomFit.innerText = 'Zoom to Selection'
+        zoomFit.onclick = () => {
+          zoomToSelection()
+          zoomLabel.innerText = `Zoom: ${(viewScale * 100).toFixed(0)}%`
+        }
+        zoomWrap.appendChild(zoomLabel)
+        zoomWrap.appendChild(zoomInput)
+        zoomWrap.appendChild(zoomFit)
+        hud.appendChild(zoomWrap)
+
+        const laBtn = document.createElement('button')
+        laBtn.className = logicAnalyzer.enabled ? 'action active' : 'action'
+        laBtn.innerText = 'Logic Analyzer'
+        laBtn.onclick = () => {
+          logicAnalyzer.enabled = !logicAnalyzer.enabled
+          refreshHUD()
+        }
+        hud.appendChild(laBtn)
+
+        const laSelect = document.createElement('select')
+        laSelect.style.width = '100%'
+        laSelect.className = 'themed-input'
+        laSelect.id = 'logic-trigger-select'
+        laSelect.onchange = (e) => {
+          logicAnalyzer.triggerWire = e.target.value || null
+          logicAnalyzer.triggered = logicAnalyzer.triggerWire ? false : true
+        }
+        const noneOpt = document.createElement('option')
+        noneOpt.value = ''
+        noneOpt.textContent = 'Trigger: none'
+        laSelect.appendChild(noneOpt)
+        probes.forEach((_, id) => {
+          const opt = document.createElement('option')
+          opt.value = id
+          opt.textContent = `Trigger: ${id}`
+          if (logicAnalyzer.triggerWire === id) opt.selected = true
+          laSelect.appendChild(opt)
+        })
+        hud.appendChild(laSelect)
+
+        const flowBtn = document.createElement('button')
+        flowBtn.className = 'action'
+        flowBtn.id = 'btn-flow-preview'
+        flowBtn.innerText = 'Show Flow'
+        flowBtn.onclick = (e) => showFlowPreview(e.currentTarget)
+        hud.appendChild(flowBtn)
+
+        const drcBtn = document.createElement('button')
+        drcBtn.className = 'action'
+        drcBtn.innerText = `Run DRC (${drcFindings.length})`
+        drcBtn.onclick = () => {
+          runDRC()
+          refreshHUD()
+        }
+        hud.appendChild(drcBtn)
+        if (drcFindings.length) {
+          const drcList = document.createElement('div')
+          drcList.style.fontSize = '11px'
+          drcList.style.color = '#f97316'
+          drcList.style.display = 'flex'
+          drcList.style.flexDirection = 'column'
+          drcList.style.gap = '4px'
+          drcFindings.slice(0, MAX_DRC_DISPLAY_COUNT).forEach((f) => {
+            const row = document.createElement('div')
+            row.textContent = `⚠ ${f.message}`
+            drcList.appendChild(row)
+          })
+          hud.appendChild(drcList)
+        }
+
+        const covLabel = document.createElement('div')
+        covLabel.style.fontSize = '11px'
+        covLabel.style.color = '#cbd5f5'
+        covLabel.textContent = 'Coverage Heatmap'
+        hud.appendChild(covLabel)
+
+        const covBtn = document.createElement('button')
+        covBtn.className = coverageEnabled ? 'action active' : 'action'
+        covBtn.innerText = coverageEnabled ? 'Coverage On' : 'Coverage Off'
+        covBtn.onclick = () => {
+          setCoverageEnabled(!coverageEnabled)
+          refreshHUD()
+        }
+        hud.appendChild(covBtn)
+
+        const covLegend = document.createElement('div')
+        covLegend.style.display = 'flex'
+        covLegend.style.gap = '8px'
+        covLegend.style.fontSize = '10px'
+        covLegend.style.color = '#94a3b8'
+        ;[
+          ['#4b5563', 'Never'],
+          ['#22c55e', 'Active'],
+          ['#ef4444', 'Hot'],
+        ].forEach(([color, label]) => {
+          const row = document.createElement('span')
+          row.style.display = 'flex'
+          row.style.alignItems = 'center'
+          row.style.gap = '4px'
+          const sw = document.createElement('span')
+          sw.className = 'swatch'
+          sw.style.backgroundColor = color
+          row.appendChild(sw)
+          row.appendChild(document.createTextNode(label))
+          covLegend.appendChild(row)
+        })
+        hud.appendChild(covLegend)
+
+        const covClear = document.createElement('button')
+        covClear.className = 'action'
+        covClear.innerText = 'Clear Coverage'
+        covClear.onclick = () => {
+          clearCoverage()
+          refreshHUD()
+        }
+        hud.appendChild(covClear)
+
+        const bundleLabel = document.createElement('div')
+        bundleLabel.style.fontSize = '11px'
+        bundleLabel.style.color = '#cbd5f5'
+        bundleLabel.textContent = 'Bus Bundles'
+        hud.appendChild(bundleLabel)
+
+        const bundleBtn = document.createElement('button')
+        bundleBtn.className = 'action'
+        bundleBtn.innerText = 'Bundle wire...'
+        bundleBtn.onclick = () => {
+          const wireId = prompt('Wire id to bundle:')
+          if (!wireId) return
+          const width = parseInt(prompt('Bundle width:', '1') || '1', 10)
+          const name = prompt('Bundle name:', 'BUS')
+          if (!name) return
+          addWireToBundle(wireId, name, width)
+          refreshHUD()
+        }
+        hud.appendChild(bundleBtn)
+
+        const bundleList = document.createElement('div')
+        bundleList.style.fontSize = '10px'
+        bundleList.style.color = '#94a3b8'
+        bundleList.id = 'bundle-list'
+        listBundles().forEach((b) => {
+          const row = document.createElement('div')
+          row.textContent = `${b.name} (${b.width}-bit) [${b.members.length}]`
+          bundleList.appendChild(row)
+        })
+        hud.appendChild(bundleList)
+
+        const tbLabel = document.createElement('div')
+        tbLabel.style.fontSize = '11px'
+        tbLabel.style.color = '#cbd5f5'
+        tbLabel.textContent = 'Testbench Sequencer'
+        hud.appendChild(tbLabel)
+
+        const tbArea = document.createElement('textarea')
+        tbArea.className = 'themed-input'
+        tbArea.style.height = '90px'
+        tbArea.value = testbench.script
+        tbArea.onchange = (e) => {
+          try {
+            const parsed = setTestbenchScript(e.target.value)
+            tbStatus.textContent = `Loaded ${parsed.length} steps`
+            tbArea.value = testbench.script
+          } catch (err) {
+            tbStatus.textContent = 'Invalid sequence'
+          }
+        }
+        hud.appendChild(tbArea)
+
+        const tbButtons = document.createElement('div')
+        tbButtons.style.display = 'flex'
+        tbButtons.style.gap = '6px'
+        tbButtons.style.flexWrap = 'wrap'
+
+        const tbRun = document.createElement('button')
+        tbRun.className = 'action'
+        tbRun.innerText = 'Run Sequence'
+        tbRun.onclick = () => {
+          try {
+            const parsed = setTestbenchScript(tbArea.value)
+            const res = runTestbench(parsed)
+            tbArea.value = testbench.script
+            tbStatus.textContent = res.passed
+              ? `PASS in ${res.ticks} ticks`
+              : `FAIL (${res.failures.length})`
+          } catch (err) {
+            tbStatus.textContent = 'Invalid sequence'
+          }
+        }
+        tbButtons.appendChild(tbRun)
+
+        const tbStop = document.createElement('button')
+        tbStop.className = 'action'
+        tbStop.innerText = 'Stop'
+        tbStop.onclick = () => {
+          stopTestbench()
+          tbStatus.textContent = 'Stopped'
+        }
+        tbButtons.appendChild(tbStop)
+
+        const tbCopy = document.createElement('button')
+        tbCopy.className = 'action'
+        tbCopy.innerText = 'Copy Sequence'
+        tbCopy.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(testbench.script)
+          } catch (err) {
+            console.warn('Copy failed', err)
+          }
+        }
+        tbButtons.appendChild(tbCopy)
+        hud.appendChild(tbButtons)
+
+        const tbStatus = document.createElement('div')
+        tbStatus.style.fontSize = '11px'
+        tbStatus.style.color = '#aaa'
+        if (testbench.lastResult) {
+          tbStatus.textContent = testbench.lastResult.passed
+            ? `PASS in ${testbench.lastResult.ticks} ticks`
+            : `FAIL (${testbench.lastResult.failures.length})`
+        } else {
+          tbStatus.textContent = 'Idle'
+        }
+        hud.appendChild(tbStatus)
+
+        const asmLabel = document.createElement('div')
+        asmLabel.style.fontSize = '11px'
+        asmLabel.style.color = '#cbd5f5'
+        asmLabel.textContent = 'Assembler & Hex'
+        hud.appendChild(asmLabel)
+
+        const isaArea = document.createElement('textarea')
+        isaArea.className = 'themed-input'
+        isaArea.style.height = '60px'
+        isaArea.id = 'asm-isa'
+        isaArea.value = assemblerState.isaText
+        isaArea.onchange = (e) => {
+          assemblerState.isaText = e.target.value
+        }
+        hud.appendChild(isaArea)
+
+        const asmArea = document.createElement('textarea')
+        asmArea.className = 'themed-input'
+        asmArea.style.height = '60px'
+        asmArea.id = 'asm-source'
+        asmArea.value = assemblerState.sourceText
+        asmArea.onchange = (e) => {
+          assemblerState.sourceText = e.target.value
+        }
+        hud.appendChild(asmArea)
+
+        const asmBtns = document.createElement('div')
+        asmBtns.style.display = 'flex'
+        asmBtns.style.gap = '6px'
+
+        const assembleBtn = document.createElement('button')
+        assembleBtn.className = 'action'
+        assembleBtn.innerText = 'Assemble'
+        assembleBtn.onclick = () => {
+          try {
+            assemblerState.lastBytes = Array.from(
+              assembleSource(assemblerState.isaText, assemblerState.sourceText) || []
+            )
+          } catch (err) {
+            alert(err?.message || 'Assembly failed')
+          }
+        }
+        asmBtns.appendChild(assembleBtn)
+
+        const asmLoadBtn = document.createElement('button')
+        asmLoadBtn.className = 'action'
+        asmLoadBtn.innerText = 'Load to ROM'
+        asmLoadBtn.onclick = () => {
+          try {
+            const target =
+              prompt('Target ROM component id:', components.find((c) => c.type === 'ROM')?.id) ||
+              null
+            if (!target) return
+            loadAssemblyIntoRom(target, assemblerState.isaText, assemblerState.sourceText)
+            alert(`Loaded ${assemblerState.lastBytes.length} bytes into ${target}`)
+          } catch (err) {
+            alert(err?.message || 'Load failed')
+          }
+        }
+        asmBtns.appendChild(asmLoadBtn)
+        hud.appendChild(asmBtns)
+
+        const asmStatus = document.createElement('div')
+        asmStatus.style.fontSize = '10px'
+        asmStatus.style.color = '#94a3b8'
+        asmStatus.textContent = `Last assemble: ${assemblerState.lastBytes.length} bytes`
+        hud.appendChild(asmStatus)
+
+        const selectBtn = document.createElement('button')
+        selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
+        selectBtn.innerText = '[ ] Select Area'
+        selectBtn.onclick = () => {
+          mode = mode === 'SELECTING' ? 'IDLE' : 'SELECTING'
+          selectionStart = null
+          selectionEnd = null
+          selectedComponents = []
+          refreshHUD()
+        }
+        hud.appendChild(selectBtn)
+
+        const shortcutBtn = document.createElement('button')
+        shortcutBtn.className = 'action'
+        shortcutBtn.innerText = 'Shortcut Mapper'
+        shortcutBtn.onclick = () => openShortcutModal()
+        hud.appendChild(shortcutBtn)
+
+        const saveCustomBtn = document.createElement('button')
+        saveCustomBtn.className = 'action'
+        saveCustomBtn.innerText = '+ Save Custom'
+        saveCustomBtn.onclick = saveCustomComponent
+        hud.appendChild(saveCustomBtn)
+
+        const sep = document.createElement('div')
+        sep.className = 'separator'
+        hud.appendChild(sep)
+
+        Object.keys(TOOLS).forEach((key) => {
+          if (customLibrary[key]) return
+          const def = TOOLS[key]
+          const btn = document.createElement('button')
+          const swatch = document.createElement('span')
+          swatch.className = 'swatch'
+          swatch.style.backgroundColor = def.color
+          btn.appendChild(swatch)
+          btn.appendChild(document.createTextNode(def.label))
+          btn.onpointerdown = (e) => {
+            e.preventDefault()
+            placingType = key
+            draggingFromMenu = true
+            mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
+          }
+          hud.appendChild(btn)
+        })
+
+        if (Object.keys(customLibrary).length) {
+          const sepCustom = document.createElement('div')
+          sepCustom.className = 'separator'
+          hud.appendChild(sepCustom)
+          Object.keys(customLibrary).forEach((key) => {
+            const btn = document.createElement('button')
+            const swatch = document.createElement('span')
+            swatch.className = 'swatch'
+            swatch.style.backgroundColor = '#6ee7b7'
+            btn.appendChild(swatch)
+            btn.appendChild(document.createTextNode(key))
+            btn.onpointerdown = (e) => {
+              e.preventDefault()
+              placingType = key
+              draggingFromMenu = true
+              mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
+            }
+            hud.appendChild(btn)
+          })
+        }
+
+        const sep2 = document.createElement('div')
+        sep2.className = 'separator'
+        hud.appendChild(sep2)
+
+        const clearBtn = document.createElement('button')
+        clearBtn.className = 'danger'
+        clearBtn.innerText = 'Clear All'
+          clearBtn.onclick = () => {
+            if (confirm('Reset Board?')) {
+              clearAllState()
+              refreshHUD()
+            }
+          }
+          hud.appendChild(clearBtn)
+      }
+
+      function buildProjectObject() {
+        const rootComps = mainContext.componentsRef || components
+        const rootWires = mainContext.wiresRef || wires
+        return {
+          format: 'OpenCircuit',
+          version: '1.0',
+          library: Object.values(customLibrary).map((def) => ({
+            name: def.name,
+            components: def.components,
+            wires: def.wires,
+            inputs: def.inputs,
+            outputs: def.outputs,
+            parameters: def.parameters || {},
+          })),
+          bundles: listBundles(),
+          main: {
+            components: rootComps.map((c) => ({
+              id: c.id,
+              type: c.type,
+              pos: { x: c.gx, y: c.gy },
+              properties: c.properties,
+              memory:
+                c.type === 'RAM' || c.type === 'ROM'
+                  ? Array.from(ensureMemory(c) || [])
+                  : undefined,
+            })),
+            wires: rootWires.map((w) => ({
+              from: { comp: w.fromCompId, port: w.fromPortId },
+              to: { comp: w.toCompId, port: w.toPortId },
+              bitWidth: w.bitWidth,
+              showFlow: !!w.showFlow,
+              netName: w.netName || undefined,
+              path: w.path || undefined,
+              pathIsGrid: w.pathIsGrid || undefined,
+              bundle: w.bundle || undefined,
+            })),
+          },
+        }
+      }
+
+      function serializeProject() {
+        return JSON.stringify(buildProjectObject(), null, 2)
+      }
+
+      function pushHistoryState(label = 'edit') {
+        if (historyMuted) return
+        if (currentContext.type === 'custom') {
+          persistCurrentDefinition()
+        }
+        const snapshot = { label, data: buildProjectObject() }
+        if (historyIndex < historyStack.length - 1) {
+          historyStack = historyStack.slice(0, historyIndex + 1)
+        }
+        historyStack.push(snapshot)
+        if (historyStack.length > HISTORY_LIMIT) {
+          historyStack.shift()
+        }
+        historyIndex = historyStack.length - 1
+      }
+
+      function restoreHistoryState(index) {
+        if (index < 0 || index >= historyStack.length) return false
+        historyMuted = true
+        loadProject(historyStack[index].data)
+        historyMuted = false
+        historyIndex = index
+        refreshHUD()
+        return true
+      }
+
+      function undoEdit() {
+        if (historyIndex <= 0) return false
+        return restoreHistoryState(historyIndex - 1)
+      }
+
+      function redoEdit() {
+        if (historyIndex >= historyStack.length - 1) return false
+        return restoreHistoryState(historyIndex + 1)
+      }
+
+      function sanitizeId(name) {
+        const s = String(name || 'n').replace(/[^a-zA-Z0-9_]/g, '_')
+        return /^[0-9]/.test(s) ? `n_${s}` : s || 'n'
+      }
+
+      function buildSignalScope(extra = {}) {
+        const scope = { time: simTime, ...extra }
+        components.forEach((c) => {
+          const baseVal =
+            c.outputs[0]?.value ?? c.inputs[0]?.value ?? c.currentValue ?? 0n
+          scope[sanitizeId(c.id)] = Number(baseVal)
+          c.outputs.forEach((p) => {
+            scope[sanitizeId(`${c.id}_${p.id}`)] = Number(p.value ?? 0n)
+          })
+          c.inputs.forEach((p) => {
+            scope[sanitizeId(`${c.id}_${p.id}`)] = Number(p.value ?? 0n)
+          })
+        })
+        wires.forEach((w) => {
+          scope[sanitizeId(w.netName || w.id)] = Number(w.value ?? 0n)
+        })
+        return scope
+      }
+
+      function evalWithSignals(expr, extra = {}) {
+        if (!expr) return false
+        const scope = buildSignalScope(extra)
+        try {
+          const tokens = Array.from(new Set(expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []))
+          let rewritten = expr
+          tokens.forEach((name) => {
+            const value = scope[sanitizeId(name)] ?? scope[name] ?? 0
+            const re = new RegExp(`\\b${name}\\b`, 'g')
+            rewritten = rewritten.replace(re, String(value))
+          })
+          if (!/^[\d\s()+\-*/%<>=!&|]+$/.test(rewritten)) return false
+          const val = evaluateNumericExpression(rewritten)
+          return Boolean(val)
+        } catch (err) {
+          return false
+        }
+      }
+
+      function evaluateNumericExpression(expr) {
+        const tokens = expr.match(/(\d+|==|!=|>=|<=|&&|\|\||[()+\-*/%<>])/g)
+        if (!tokens || !tokens.length) return 0
+        const compact = expr.replace(/\s+/g, '')
+        if (tokens.join('') !== compact) return 0
+        let expectValue = true
+        let balance = 0
+        for (const t of tokens) {
+          if (t === '(') {
+            balance++
+            continue
+          }
+          if (t === ')') {
+            balance--
+            if (balance < 0 || expectValue) return 0
+            continue
+          }
+          if (/^\d+$/.test(t)) {
+            if (!expectValue) return 0
+            expectValue = false
+          } else {
+            if (expectValue) return 0
+            expectValue = true
+          }
+        }
+        if (balance !== 0 || expectValue) return 0
+        const prec = {
+          '||': 1,
+          '&&': 2,
+          '==': 3,
+          '!=': 3,
+          '>=': 4,
+          '<=': 4,
+          '>': 4,
+          '<': 4,
+          '+': 5,
+          '-': 5,
+          '*': 6,
+          '/': 6,
+          '%': 6,
+        }
+        const output = []
+        const ops = []
+        tokens.forEach((t) => {
+          if (/^\d+$/.test(t)) {
+            output.push(Number(t))
+          } else if (t === '(') {
+            ops.push(t)
+          } else if (t === ')') {
+            while (ops.length && ops[ops.length - 1] !== '(') {
+              output.push(ops.pop())
+            }
+            ops.pop()
+          } else {
+            while (
+              ops.length &&
+              ops[ops.length - 1] !== '(' &&
+              prec[ops[ops.length - 1]] >= prec[t]
+            ) {
+              output.push(ops.pop())
+            }
+            ops.push(t)
+          }
+        })
+        while (ops.length) output.push(ops.pop())
+        const stack = []
+        output.forEach((tok) => {
+          if (typeof tok === 'number') {
+            stack.push(tok)
+          } else {
+            const b = stack.pop() || 0
+            const a = stack.pop() || 0
+            switch (tok) {
+              case '+':
+                stack.push(a + b)
+                break
+              case '-':
+                stack.push(a - b)
+                break
+              case '*':
+                stack.push(a * b)
+                break
+              case '/':
+                stack.push(b === 0 ? 0 : Math.trunc(a / b))
+                break
+              case '%':
+                stack.push(b === 0 ? 0 : Math.trunc(a) % Math.trunc(b))
+                break
+              case '==':
+                stack.push(a === b ? 1 : 0)
+                break
+              case '!=':
+                stack.push(a !== b ? 1 : 0)
+                break
+              case '>':
+                stack.push(a > b ? 1 : 0)
+                break
+              case '<':
+                stack.push(a < b ? 1 : 0)
+                break
+              case '>=':
+                stack.push(a >= b ? 1 : 0)
+                break
+              case '<=':
+                stack.push(a <= b ? 1 : 0)
+                break
+              case '&&':
+                stack.push(a && b ? 1 : 0)
+                break
+              case '||':
+                stack.push(a || b ? 1 : 0)
+                break
+              default:
+                stack.push(0)
+            }
+          }
+        })
+        return stack.pop() || 0
+      }
+
+      function normalizeFsmDefinition(def) {
+        const base = def && typeof def === 'object' ? def : {}
+        const states =
+          Array.isArray(base.states) && base.states.length
+            ? base.states.map((s, idx) => ({
+                id: s.id || s.name || `S${idx}`,
+                label: s.label || s.id || s.name || `S${idx}`,
+                output: s.output ?? s.value ?? idx,
+              }))
+            : [
+                { id: 'S0', label: 'S0', output: 0 },
+                { id: 'S1', label: 'S1', output: 1 },
+              ]
+        const transitions = Array.isArray(base.transitions)
+          ? base.transitions.map((t) => ({
+              from: t.from || states[0].id,
+              to: t.to || t.target || states[0].id,
+              condition: t.condition || t.when || null,
+              action: t.action || null,
+            }))
+          : [
+              { from: states[0].id, to: states[1].id, condition: 'input!=0' },
+              { from: states[1].id, to: states[0].id, condition: 'input==0' },
+            ]
+        return {
+          states,
+          transitions,
+          initial: base.initial || base.start || states[0].id,
+        }
+      }
+
+      function evaluateFSMComponent(comp, inputs) {
+        const fsm = normalizeFsmDefinition(comp.properties.fsm)
+        comp.properties.fsm = fsm
+        if (!comp.fsmState) comp.fsmState = fsm.initial || fsm.states[0]?.id
+        const [inVal, clk] = inputs
+        const prevClock = comp.lastClock ?? 0n
+        const currentClk = clk ?? 0n
+        const rising = currentClk !== 0n && prevClock === 0n
+        if (rising) {
+          const scope = { input: Number(inVal ?? 0n), state: comp.fsmState }
+          const candidates = fsm.transitions.filter(
+            (t) => !t.from || t.from === comp.fsmState
+          )
+          const hit = candidates.find(
+            (t) => !t.condition || evalWithSignals(t.condition, scope)
+          )
+          if (hit) {
+            comp.fsmState = hit.to || comp.fsmState
+          }
+        }
+        comp.lastClock = currentClk
+        const idx = Math.max(
+          0,
+          fsm.states.findIndex((s) => s.id === comp.fsmState)
+        )
+        const selected = fsm.states[idx] || fsm.states[0]
+        const outVal = selected?.output ?? idx
+        return [maskValue(outVal, comp.outputs[0]?.bitWidth || 1)]
+      }
+
+      function addBreakpoint(expr) {
+        if (!expr) return null
+        const bp = {
+          id: makeId('bp'),
+          expr: String(expr),
+          enabled: true,
+          hitAt: null,
+        }
+        breakpoints.push(bp)
+        return bp
+      }
+
+      function removeBreakpoint(id) {
+        const idx = breakpoints.findIndex((b) => b.id === id)
+        if (idx >= 0) {
+          breakpoints.splice(idx, 1)
+          return true
+        }
+        return false
+      }
+
+      function setBreakpointEnabled(id, enabled) {
+        const bp = breakpoints.find((b) => b.id === id)
+        if (!bp) return false
+        bp.enabled = enabled
+        return true
+      }
+
+      function checkBreakpoints() {
+        lastBreakpointHit = null
+        breakpoints.forEach((bp) => {
+          if (!bp.enabled || !bp.expr) return
+          const result = evalWithSignals(bp.expr, { bp: bp.id })
+          if (result) {
+            bp.hitAt = simTime
+            lastBreakpointHit = bp
+            isPaused = true
+          }
+        })
+        if (lastBreakpointHit && !document.hidden) refreshHUD()
+      }
+
+      function listBreakpoints() {
+        return breakpoints.map((b) => ({ ...b }))
+      }
+
+      function clearBreakpoints() {
+        breakpoints.length = 0
+        lastBreakpointHit = null
+      }
+
+      function ensureBundle(name, width = 1) {
+        if (!name) return null
+        const key = String(name)
+        const widthBits = clampBits(width)
+        if (!bundles.has(key)) {
+          bundles.set(key, { name: key, width: widthBits, members: new Set() })
+        }
+        const entry = bundles.get(key)
+        entry.width = widthBits
+        return entry
+      }
+
+      function addWireToBundle(wireId, bundleName, width) {
+        const wire = wires.find((w) => w.id === wireId)
+        if (!wire) return false
+        const targetWidth = width || wire.bitWidth
+        const bundle = ensureBundle(bundleName, targetWidth)
+        if (!bundle) return false
+        const fromPort = getPort(wire.fromCompId, wire.fromPortId)
+        const toPort = getPort(wire.toCompId, wire.toPortId)
+        if (!fromPort || !toPort) return false
+        if (fromPort.bitWidth !== bundle.width || toPort.bitWidth !== bundle.width) return false
+        wire.bundle = bundle.name
+        wire.bitWidth = bundle.width
+        wire.netName = wire.netName || bundle.name
+        bundle.members.add(wire.id)
+        return true
+      }
+
+      function removeWireFromBundle(wireId) {
+        const wire = wires.find((w) => w.id === wireId)
+        if (!wire) return false
+        if (wire.bundle && bundles.has(wire.bundle)) {
+          bundles.get(wire.bundle).members.delete(wire.id)
+        }
+        wire.bundle = null
+        return true
+      }
+
+      function listBundles() {
+        return Array.from(bundles.values()).map((b) => ({
+          name: b.name,
+          width: b.width,
+          members: Array.from(b.members),
+        }))
+      }
+
+      function normalizeIsaDefinitions(defs) {
+        if (!defs) return []
+        if (typeof defs === 'string') {
+          return defs
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .map((line) => {
+              const [pat, tpl] = line.split('=>').map((s) => s.trim())
+              if (!pat) return null
+              return {
+                regex: new RegExp(pat, 'i'),
+                encode: tpl || '0',
+              }
+            })
+            .filter(Boolean)
+        }
+        if (Array.isArray(defs)) {
+          return defs.map((d) => {
+            const regex =
+              d.regex instanceof RegExp
+                ? d.regex
+                : d.pattern instanceof RegExp
+                ? d.pattern
+                : new RegExp(d.pattern || d.name || '.*', d.flags || 'i')
+            return { regex, encode: d.encode ?? d.value ?? 0 }
+          })
+        }
+        return []
+      }
+
+      function parseByteValue(val) {
+        if (typeof val === 'number') return val & BYTE_MASK
+        const s = String(val || '0').trim()
+        if (/^0x/i.test(s)) return parseInt(s, 16) & BYTE_MASK
+        if (/^0b/i.test(s)) return parseInt(s.slice(2), 2) & BYTE_MASK
+        return parseInt(s, 10) & BYTE_MASK
+      }
+
+      function encodeInstruction(def, match) {
+        if (!def) return []
+        if (typeof def.encode === 'function') {
+          const res = def.encode(match) ?? []
+          const arr = Array.isArray(res) ? res : [res]
+          return arr.map((v) => parseByteValue(v))
+        }
+        if (typeof def.encode === 'number') return [parseByteValue(def.encode)]
+        const tpl = String(def.encode || '')
+        if (!tpl.includes('${')) {
+          return tpl
+            .split(',')
+            .map((p) => p.trim())
+            .filter(Boolean)
+            .map((p) => parseByteValue(p))
+        }
+        const replaced = tpl.replace(/\$\{([^}]+)\}/g, (_, name) => {
+          if (!SAFE_IDENTIFIER_RE.test(name)) return '0'
+          const raw = match?.groups?.[name] ?? ''
+          return String(parseByteValue(raw))
+        })
+        return replaced
+          .split(',')
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .map((p) => parseByteValue(p))
+      }
+
+      function assembleSource(defs, source) {
+        const isa = normalizeIsaDefinitions(defs)
+        const src = typeof source === 'string' ? source : ''
+        const bytes = []
+        src
+          .split('\n')
+          .map((l) => {
+            const idx = l.search(/[#;]/)
+            if (idx === -1) return l.trim()
+            if (idx > 0 && l[idx - 1] === '\\') return l.trim()
+            return l.slice(0, idx).trim()
+          })
+          .filter(Boolean)
+          .forEach((line) => {
+            const def = isa.find((d) => d.regex.test(line))
+            if (!def) {
+              const safeLine = String(line || '').slice(0, ASM_ERROR_PREVIEW_CHARS)
+              throw new Error(`No rule for line: ${safeLine}`)
+            }
+            const match = line.match(def.regex)
+            bytes.push(...encodeInstruction(def, match))
+          })
+        assemblerState.lastBytes = bytes.slice()
+        return Uint8Array.from(bytes.map((b) => b & BYTE_MASK))
+      }
+
+      function loadAssemblyIntoRom(romId, defs, source) {
+        const bytes = assembleSource(defs, source)
+        const comp = components.find((c) => c.id === romId)
+        if (!comp) throw new Error('ROM not found')
+        const mem = ensureMemory(comp)
+        if (!mem) throw new Error('ROM memory unavailable')
+        mem.fill(0)
+        mem.set(Array.from(bytes).slice(0, mem.length))
+        queueComponent(comp, 0)
+        return bytes
+      }
+
+      function synthesizeFSM(def) {
+        const normalized = normalizeFsmDefinition(def)
+        const bits = clampBits(
+          Math.max(1, Math.ceil(Math.log2(Math.max(1, normalized.states.length))) || 1)
+        )
+        const componentsDef = [
+          { id: 'fsm_clk', type: 'INPUT', gx: 0, gy: 0, properties: { bitWidth: 1 } },
+          {
+            id: 'fsm_in',
+            type: 'INPUT',
+            gx: 0,
+            gy: 2,
+            properties: { bitWidth: clampBits(def?.inputWidth || 1) },
+          },
+          { id: 'state_reg', type: 'DFF', gx: 2, gy: 1, properties: { bitWidth: bits } },
+          { id: 'state_out', type: 'OUTPUT', gx: 5, gy: 1, properties: { bitWidth: bits } },
+        ]
+        const wiresDef = [
+          {
+            fromCompId: 'state_reg',
+            fromPortId: 'q',
+            toCompId: 'state_out',
+            toPortId: 'in',
+            bitWidth: bits,
+          },
+          {
+            fromCompId: 'fsm_clk',
+            fromPortId: 'out',
+            toCompId: 'state_reg',
+            toPortId: 'clk',
+            bitWidth: 1,
+          },
+          {
+            fromCompId: 'fsm_in',
+            fromPortId: 'out',
+            toCompId: 'state_reg',
+            toPortId: 'd',
+            bitWidth: bits,
+          },
+        ]
+        return { components: componentsDef, wires: wiresDef, definition: normalized }
+      }
+
+      function widthDecl(width) {
+        const bits = clampBits(width || 1)
+        return bits > 1 ? `[${bits - 1}:0] ` : ''
+      }
+
+      function exportVerilog(moduleName = 'circuit') {
+        const modName = sanitizeId(moduleName)
+        const compById = new Map(components.map((c) => [c.id, c]))
+        const wireToInput = new Map()
+        wires.forEach((w) => {
+          wireToInput.set(`${w.toCompId}:${w.toPortId}`, w)
+        })
+
+        const outputNet = new Map()
+        function netNameForWire(wire, fallback) {
+          if (wire?.netName) return sanitizeId(wire.netName)
+          return fallback
+        }
+        function netForOutput(comp, port) {
+          const key = `${comp.id}:${port.id}`
+          if (outputNet.has(key)) return outputNet.get(key)
+          let base =
+            comp.type === 'INPUT'
+              ? sanitizeId(comp.id)
+              : sanitizeId(`${comp.id}_${port.id}`)
+          const net = base || sanitizeId(key)
+          outputNet.set(key, net)
+          return net
+        }
+
+        function inputNet(comp, port) {
+          const w = wireToInput.get(`${comp.id}:${port.id}`)
+          if (!w) return DEFAULT_NET
+          if (w.netName) return sanitizeId(w.netName)
+          const src = compById.get(w.fromCompId)
+          const srcPort = src?.outputs.find((p) => p.id === w.fromPortId)
+          if (!src || !srcPort) return DEFAULT_NET
+          return netForOutput(src, srcPort)
+        }
+
+        const inputs = components
+          .filter((c) => c.type === 'INPUT')
+          .map((c) => ({
+            name: sanitizeId(c.id),
+            width: c.properties.bitWidth || 1,
+          }))
+
+        const outputs = components
+          .filter((c) => c.type === 'OUTPUT')
+          .map((c) => ({
+            name: sanitizeId(c.id),
+            width: c.properties.bitWidth || 1,
+            source: inputNet(c, c.inputs[0]),
+          }))
+
+        const wiresDecl = []
+        const assigns = []
+
+        components.forEach((comp) => {
+          if (comp.type === 'INPUT' || comp.type === 'OUTPUT') return
+          comp.outputs.forEach((port) => {
+            const net = netNameForWire(
+              wireToInput.get(`${comp.id}:${port.id}`),
+              netForOutput(comp, port)
+            )
+            wiresDecl.push({ name: net, width: port.bitWidth })
+          })
+          const ins = comp.inputs.map((p) => inputNet(comp, p))
+          switch (comp.type) {
+            case 'NOT':
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = ~(${ins[0]});`
+              )
+              break
+            case 'AND':
+            case 'NAND': {
+              const expr = ins.join(' & ')
+              const base = `(${expr})`
+              const body =
+                comp.type === 'NAND'
+                  ? `~${base}`
+                  : base
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = ${body};`
+              )
+              break
+            }
+            case 'OR':
+            case 'NOR': {
+              const expr = ins.join(' | ')
+              const base = `(${expr})`
+              const body =
+                comp.type === 'NOR'
+                  ? `~${base}`
+                  : base
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = ${body};`
+              )
+              break
+            }
+            case 'XOR':
+            case 'XNOR': {
+              const expr = ins.join(' ^ ')
+              const base = `(${expr})`
+              const body =
+                comp.type === 'XNOR'
+                  ? `~${base}`
+                  : base
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = ${body};`
+              )
+              break
+            }
+            case 'SPLITTER': {
+              const inNet = ins[0]
+              comp.outputs.forEach((port, idx) => {
+                assigns.push(
+                  `assign ${netForOutput(comp, port)} = ${inNet}[${idx}];`
+                )
+              })
+              break
+            }
+            case 'MERGER': {
+              const concat = comp.inputs
+                .map((_, idx) => ins[idx])
+                .reverse()
+                .join(', ')
+              assigns.push(
+                `assign ${netForOutput(comp, comp.outputs[0])} = {${concat}};`
+              )
+              break
+            }
+            default:
+              break
+          }
+        })
+
+        wires.forEach((w) => {
+          if (w.netName) {
+            wiresDecl.push({ name: sanitizeId(w.netName), width: w.bitWidth })
+          }
+        })
+
+        outputs.forEach((out) => {
+          if (out.source) {
+            assigns.push(`assign ${out.name} = ${out.source};`)
+          }
+        })
+
+        const uniqueWires = []
+        const seenWire = new Set()
+        wiresDecl.forEach((w) => {
+          if (seenWire.has(w.name)) return
+          seenWire.add(w.name)
+          uniqueWires.push(w)
+        })
+
+        const lines = []
+        const portList = [...inputs.map((p) => p.name), ...outputs.map((p) => p.name)]
+        lines.push(`module ${modName}(${portList.join(', ')});`)
+        inputs.forEach((p) =>
+          lines.push(`  input ${widthDecl(p.width)}${p.name};`)
+        )
+        outputs.forEach((p) =>
+          lines.push(`  output ${widthDecl(p.width)}${p.name};`)
+        )
+        uniqueWires.forEach((w) =>
+          lines.push(`  wire ${widthDecl(w.width)}${w.name};`)
+        )
+        assigns.forEach((a) => lines.push(`  ${a}`))
+        lines.push('endmodule')
+        return lines.join('\n')
+      }
+
+      function downloadVerilog() {
+        const name = prompt('Module name for export?', 'circuit') || 'circuit'
+        const code = exportVerilog(name)
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(code).catch((err) => {
+            console.warn('Failed to copy Verilog code to clipboard', err)
+          })
+        } else {
+          console.warn('Clipboard API unavailable; skipped copying Verilog')
+        }
+        const blob = new Blob([code], { type: 'text/plain' })
+        const a = document.createElement('a')
+        a.href = URL.createObjectURL(blob)
+        a.download = `${sanitizeId(name)}.v`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        setTimeout(() => URL.revokeObjectURL(a.href), BLOB_CLEANUP_DELAY_MS)
+      }
+
+      function updateSaveTextarea() {
+        saveTextarea.value = serializeProject()
+      }
+
+      async function handleLoad() {
+        try {
+          let text = loadTextarea.value.trim()
+          if (loadFileInput.files && loadFileInput.files[0]) {
+            text = await loadFileInput.files[0].text()
+          }
+          if (!text) {
+            alert('Provide JSON via text area or file input.')
+            return
+          }
+          const data = JSON.parse(text)
+          loadProject(data)
+          closeModal()
+        } catch (err) {
+          alert('Failed to load project: ' + err.message)
+        }
+      }
+
+      function setMainContext(newComponents, newWires) {
+        components = newComponents
+        wires = newWires
+        mainContext.componentsRef = components
+        mainContext.wiresRef = wires
+        currentContext = mainContext
+        contextStack = []
+        camera = { x: 0, y: 0 }
+        selectedComponents = []
+      }
+
+      function loadProject(data) {
+        if (!data || data.format !== 'OpenCircuit') {
+          throw new Error('Invalid format')
+        }
+        Object.keys(customLibrary).forEach((k) => {
+          delete customLibrary[k]
+          if (TOOLS[k]) delete TOOLS[k]
+        })
+        components = []
+        wires = []
+        probes.clear()
+        drcFindings = []
+        bundles.clear()
+        if (Array.isArray(data.bundles)) {
+          data.bundles.forEach((b) => ensureBundle(b.name, b.width))
+        }
+        resetSimulationClock()
+        const lib = data.library || []
+        lib.forEach((d) => {
+          if (!d.name) return
+          registerCustomTool({
+            name: d.name,
+            components: d.components || [],
+            wires: d.wires || [],
+            inputs: d.inputs || [],
+            outputs: d.outputs || [],
+            parameters: d.parameters || {},
+          })
+        })
+        const list = data.main?.components || []
+        list.forEach((c) => {
+          const props = { ...(c.properties || {}) }
+          if (props.inputs && !props.busSize) props.busSize = props.inputs
+          if (props.outputs && !props.busSize) props.busSize = props.outputs
+          const comp = new Component(
+            c.pos?.x ?? c.x ?? 0,
+            c.pos?.y ?? c.y ?? 0,
+            c.type,
+            props
+          )
+          comp.id = c.id || comp.id
+          if ((c.type === 'RAM' || c.type === 'ROM') && Array.isArray(c.memory)) {
+            comp.memory = Uint8Array.from(c.memory)
+          }
+          configureComponent(comp)
+          components.push(comp)
+        })
+
+        const wireList = data.main?.wires || []
+        wireList.forEach((w) => {
+          const fromComp = components.find((c) => c.id === w.from?.comp)
+          const toComp = components.find((c) => c.id === w.to?.comp)
+          if (!fromComp || !toComp) return
+          const fromPort = fromComp.outputs.find((p) => p.id === w.from?.port)
+          const toPort = toComp.inputs.find((p) => p.id === w.to?.port)
+          if (!fromPort || !toPort) return
+          const bitWidth = w.bitWidth || fromPort.bitWidth
+          if (fromPort.bitWidth !== toPort.bitWidth) return
+          const wireObj = new Wire({
+            id: w.id,
+            fromCompId: fromComp.id,
+            fromPortId: fromPort.id,
+            toCompId: toComp.id,
+            toPortId: toPort.id,
+            bitWidth,
+            showFlow: !!w.showFlow,
+            netName: w.netName || null,
+            path: w.path || null,
+            pathIsGrid: !!w.pathIsGrid,
+            bundle: w.bundle || null,
+          })
+          if (!wireObj.path) applyAutoRoute(wireObj)
+          wires.push(wireObj)
+          if (wireObj.bundle) {
+            addWireToBundle(wireObj.id, wireObj.bundle, wireObj.bitWidth)
+          }
+        })
+        setMainContext(components, wires)
+        seedInitialEvents()
+        processEventsUntil(simTime)
+        if (!historyMuted) pushHistoryState('load')
+      }
+
+      function openModal(tab = 'save') {
+        modalBackdrop.classList.remove('hidden')
+        setModalTab(tab)
+        updateSaveTextarea()
+      }
+
+      function clearAllState() {
+        Object.keys(customLibrary).forEach((k) => {
+          delete customLibrary[k]
+          if (TOOLS[k]) delete TOOLS[k]
+        })
+        components = []
+        wires = []
+        probes.clear()
+        breakpoints.length = 0
+        lastBreakpointHit = null
+        bundles.clear()
+        assemblerState.lastBytes = []
+        selectedComponents = []
+        resetSimulationClock()
+        drcFindings = []
+        clearCoverage()
+        setMainContext(components, wires)
+        seedInitialEvents()
+        if (!historyMuted) pushHistoryState('clear')
+      }
+
+      function saveCustomComponent() {
+        if (!selectedComponents.length) {
+          alert('Select components first using Select Area.')
+          return
+        }
+        const name = prompt('Custom component name:', `CHIP_${Object.keys(customLibrary).length + 1}`)
+        if (!name) return
+
+        const ids = new Set(selectedComponents.map((c) => c.id))
+        let minX = Infinity
+        let minY = Infinity
+        selectedComponents.forEach((c) => {
+          minX = Math.min(minX, c.gx)
+          minY = Math.min(minY, c.gy)
+        })
+
+        const inputNodes = selectedComponents
+          .filter((c) => c.type === 'INPUT')
+          .sort((a, b) => a.gy - b.gy || a.gx - b.gx)
+        const outputNodes = selectedComponents
+          .filter((c) => c.type === 'OUTPUT')
+          .sort((a, b) => a.gy - b.gy || a.gx - b.gx)
+
+        const comps = selectedComponents.map((c) => ({
+          id: c.id,
+          type: c.type,
+          gx: c.gx - minX,
+          gy: c.gy - minY,
+          properties: { ...c.properties },
+        }))
+
+        const wireList = wires
+          .filter((w) => ids.has(w.fromCompId) && ids.has(w.toCompId))
+          .map((w) => ({
+            fromCompId: w.fromCompId,
+            toCompId: w.toCompId,
+            fromPortId: w.fromPortId,
+            toPortId: w.toPortId,
+            bitWidth: w.bitWidth,
+          }))
+
+        const def = {
+          name,
+          components: comps,
+          wires: wireList,
+          inputs: inputNodes.map((c) => ({
+            componentId: c.id,
+            bitWidth: c.properties.bitWidth || 1,
+          })),
+          outputs: outputNodes.map((c) => ({
+            componentId: c.id,
+            bitWidth: c.properties.bitWidth || 1,
+          })),
+        }
+        registerCustomTool(def)
+        pushHistoryState('custom-save')
+        refreshHUD()
+      }
+
+      function buildEditableDef(def) {
+        const compMap = new Map()
+        const compList = (def.components || []).map((c) => {
+          const props = { ...(c.properties || {}) }
+          const inst = new Component(
+            c.gx ?? c.pos?.x ?? c.x ?? 0,
+            c.gy ?? c.pos?.y ?? c.y ?? 0,
+            c.type,
+            props
+          )
+          inst.id = c.id || inst.id
+          configureComponent(inst)
+          compMap.set(inst.id, inst)
+          return inst
+        })
+        const wireList = []
+        ;(def.wires || []).forEach((w) => {
+          const fromComp = compMap.get(w.fromCompId)
+          const toComp = compMap.get(w.toCompId)
+          if (!fromComp || !toComp) return
+          const fromPort = fromComp.outputs.find((p) => p.id === w.fromPortId)
+          const toPort = toComp.inputs.find((p) => p.id === w.toPortId)
+          if (!fromPort || !toPort) return
+          const wireObj = new Wire({
+            id: w.id,
+            fromCompId: fromComp.id,
+            fromPortId: fromPort.id,
+            toCompId: toComp.id,
+            toPortId: toPort.id,
+            bitWidth: w.bitWidth || fromPort.bitWidth,
+            netName: w.netName || null,
+            path: w.path || null,
+            pathIsGrid: !!w.pathIsGrid,
+            bundle: w.bundle || null,
+          })
+          if (!wireObj.path) {
+            const start = {
+              x: fromComp.gx + fromPort.relativeX,
+              y: fromComp.gy + fromPort.relativeY,
+            }
+            const end = { x: toComp.gx + toPort.relativeX, y: toComp.gy + toPort.relativeY }
+            wireObj.path = [
+              { x: start.x, y: start.y },
+              { x: start.x, y: end.y },
+              { x: end.x, y: end.y },
+            ]
+            wireObj.pathIsGrid = true
+          }
+          wireList.push(wireObj)
+        })
+        return { components: compList, wires: wireList }
+      }
+
+      function persistCurrentDefinition() {
+        if (currentContext.type !== 'custom') return
+        const def = currentContext.def
+        if (!def) return
+        def.components = components.map((c) => ({
+          id: c.id,
+          type: c.type,
+          gx: c.gx,
+          gy: c.gy,
+          properties: { ...c.properties },
+        }))
+        def.wires = wires.map((w) => ({
+          id: w.id,
+          fromCompId: w.fromCompId,
+          toCompId: w.toCompId,
+          fromPortId: w.fromPortId,
+          toPortId: w.toPortId,
+          bitWidth: w.bitWidth,
+          netName: w.netName || null,
+          path: w.path || null,
+          pathIsGrid: w.pathIsGrid || false,
+          bundle: w.bundle || null,
+        }))
+        const inputs = components
+          .filter((c) => c.type === 'INPUT')
+          .sort((a, b) => a.gy - b.gy || a.gx - b.gx)
+          .map((c) => ({
+            componentId: c.id,
+            bitWidth: c.properties.bitWidth || 1,
+          }))
+        const outputs = components
+          .filter((c) => c.type === 'OUTPUT')
+          .sort((a, b) => a.gy - b.gy || a.gx - b.gx)
+          .map((c) => ({
+            componentId: c.id,
+            bitWidth: c.properties.bitWidth || 1,
+          }))
+        def.inputs = inputs
+        def.outputs = outputs
+        ;(mainContext.componentsRef || []).forEach((inst) => {
+          if (inst.type === def.name) {
+            inst.subInstance = null
+            queueComponent(inst, 0)
+          }
+        })
+        registerCustomTool({
+          name: def.name,
+          components: def.components,
+          wires: def.wires,
+          inputs: def.inputs,
+          outputs: def.outputs,
+          parameters: def.parameters || {},
+        })
+        currentContext.def = customLibrary[def.name] || def
+      }
+
+      function enterCustomEdit(name) {
+        const def = customLibrary[name]
+        if (!def) return false
+        const editable = buildEditableDef(def)
+        contextStack.push({
+          name: currentContext.name,
+          type: currentContext.type,
+          def: currentContext.def,
+          componentsRef: components,
+          wiresRef: wires,
+        })
+        components = editable.components
+        wires = editable.wires
+        currentContext = {
+          name,
+          type: 'custom',
+          def,
+          componentsRef: components,
+          wiresRef: wires,
+        }
+        camera = { x: 0, y: 0 }
+        selectedComponents = []
+        seedInitialEvents()
+        refreshHUD()
+        return true
+      }
+
+      function exitCustomEdit() {
+        if (currentContext.type !== 'custom') return false
+        persistCurrentDefinition()
+        const prev = contextStack.pop() || mainContext
+        components = prev.componentsRef
+        wires = prev.wiresRef
+        currentContext = prev
+        seedInitialEvents()
+        runTickFor(components, wires)
+        runTickFor(components, wires)
+        wires.forEach((wire) => {
+          const dest = components.find((c) => c.id === wire.toCompId)
+          const port = dest?.inputs.find((p) => p.id === wire.toPortId)
+          if (port) port.value = wire.value
+        })
+        refreshHUD()
+        pushHistoryState('custom-edit')
+        return true
+      }
+
+      function placeCustom(name, gx, gy) {
+        const tmpl = customLibrary[name]
+        if (!tmpl) return
+        if (checkCollision(gx, gy, name)) return
+        const comp = new Component(gx, gy, name)
+        components.push(comp)
+        queueComponent(comp, 0)
+        pushHistoryState('place')
+      }
+
+      function placeFromPalette(gx, gy, type) {
+        if (customLibrary[type]) {
+          placeCustom(type, gx, gy)
+          return
+        }
+        if (!checkCollision(gx, gy, type)) {
+          const comp = new Component(gx, gy, type)
+          components.push(comp)
+          queueComponent(comp, 0)
+          pushHistoryState('place')
+        }
+      }
+
+      function rotateComponent(comp) {
+        const oldW = comp.w
+        const oldH = comp.h
+        const center = { x: comp.gx + oldW / 2, y: comp.gy + oldH / 2 }
+        comp.inputs.forEach((p) => {
+          const dx = p.relativeX - oldW / 2
+          const dy = p.relativeY - oldH / 2
+          p.relativeX = oldH / 2 - dy
+          p.relativeY = oldW / 2 + dx
+        })
+        comp.outputs.forEach((p) => {
+          const dx = p.relativeX - oldW / 2
+          const dy = p.relativeY - oldH / 2
+          p.relativeX = oldH / 2 - dy
+          p.relativeY = oldW / 2 + dx
+        })
+        comp.w = oldH
+        comp.h = oldW
+        comp.gx = Math.round(center.x - comp.w / 2)
+        comp.gy = Math.round(center.y - comp.h / 2)
+      }
+
+      function rotateSelection() {
+        if (!selectedComponents.length) return
+        selectedComponents.forEach((comp) => {
+          rotateComponent(comp)
+          rerouteForComponent(comp)
+        })
+        pushHistoryState('rotate')
+      }
+
+      function removeSelection() {
+        if (selectedComponents.length) {
+          selectedComponents.slice().forEach((c) => removeComponent(c))
+          selectedComponents = []
+        }
+      }
+
+      function toggleSelectionState() {
+        const pool = selectedComponents.length
+          ? selectedComponents
+          : hoverPort
+            ? [hoverPort.component]
+            : []
+        pool.forEach((c) => {
+          if (c.type === 'INPUT') {
+            c.state = !c.state
+            queueComponent(c, 0)
+          }
+        })
+      }
+
+      function hideContextMenu() {
+        ctxMenu.classList.add('hidden')
+        ctxMenu.innerHTML = ''
+      }
+
+      function showContextMenu(x, y, items) {
+        ctxMenu.innerHTML = ''
+        items.forEach((item) => {
+          const btn = document.createElement('button')
+          btn.innerText = item.label
+          btn.onclick = () => {
+            hideContextMenu()
+            item.action()
+          }
+          ctxMenu.appendChild(btn)
+        })
+        ctxMenu.style.left = `${x}px`
+        ctxMenu.style.top = `${y}px`
+        ctxMenu.classList.remove('hidden')
+      }
+
+      function showFlowPreview(anchorEl) {
+        if (!anchorEl) return
+        hideContextMenu()
+        const img = new Image()
+        img.src = canvas.toDataURL('image/png')
+        img.alt = 'Flow preview'
+        img.style.maxWidth = '280px'
+        img.style.borderRadius = '6px'
+        img.style.display = 'block'
+        const title = document.createElement('div')
+        title.style.color = '#cbd5f5'
+        title.style.fontSize = '12px'
+        title.style.marginBottom = '6px'
+        title.textContent = 'Current Flow Snapshot'
+        ctxMenu.appendChild(title)
+        ctxMenu.appendChild(img)
+        const rect = anchorEl.getBoundingClientRect()
+        ctxMenu.style.left = `${rect.right + 8}px`
+        ctxMenu.style.top = `${rect.top}px`
+        ctxMenu.classList.remove('hidden')
+      }
+
+      document.addEventListener('pointerdown', (e) => {
+        if (!ctxMenu.classList.contains('hidden') && !ctxMenu.contains(e.target)) {
+          hideContextMenu()
+        }
+      })
+
+      minimapCanvas.addEventListener('pointerdown', (e) => {
+        minimapDragging = true
+        handleMinimapNav(e)
+        e.preventDefault()
+      })
+      minimapCanvas.addEventListener('pointermove', (e) => {
+        if (minimapDragging) {
+          handleMinimapNav(e)
+        }
+      })
+
+      function hitTestWire(clientX, clientY) {
+        const sceneX = clientX / viewScale
+        const sceneY = clientY / viewScale
+        const tolerance = 8
+        for (const w of wires) {
+          const fromComp = components.find((c) => c.id === w.fromCompId)
+          const toComp = components.find((c) => c.id === w.toCompId)
+          if (!fromComp || !toComp) continue
+          const a = portPosition(
+            fromComp,
+            fromComp.outputs.find((p) => p.id === w.fromPortId)
+          )
+          const b = portPosition(
+            toComp,
+            toComp.inputs.find((p) => p.id === w.toPortId)
+          )
+          if (!a || !b) continue
+          const dx = b.x - a.x
+          const dy = b.y - a.y
+          const len2 = dx * dx + dy * dy
+          if (len2 === 0) continue
+          const t = Math.max(
+            0,
+            Math.min(1, ((sceneX - a.x) * dx + (sceneY - a.y) * dy) / len2)
+          )
+          const px = a.x + t * dx
+          const py = a.y + t * dy
+          const dist = Math.hypot(sceneX - px, sceneY - py)
+          if (dist <= tolerance) return w
+        }
+        return null
+      }
+
+      function closeModal() {
+        modalBackdrop.classList.add('hidden')
+      }
+
+      function setModalTab(tab) {
+        const saveContent = document.querySelector(
+          '.modal-content[data-tab="save"]'
+        )
+        const loadContent = document.querySelector(
+          '.modal-content[data-tab="load"]'
+        )
+        if (tab === 'save') {
+          tabSave.classList.add('active')
+          tabLoad.classList.remove('active')
+          saveContent.classList.remove('hidden')
+          loadContent.classList.add('hidden')
+          updateSaveTextarea()
+        } else {
+          tabLoad.classList.add('active')
+          tabSave.classList.remove('active')
+          saveContent.classList.add('hidden')
+          loadContent.classList.remove('hidden')
+        }
+      }
+
+      function initModalEvents() {
+        modalClose.addEventListener('click', closeModal)
+        tabSave.addEventListener('click', () => setModalTab('save'))
+        tabLoad.addEventListener('click', () => setModalTab('load'))
+        copyBtn.addEventListener('click', async () => {
+          updateSaveTextarea()
+          try {
+            await navigator.clipboard.writeText(saveTextarea.value)
+          } catch (err) {
+            alert('Copy failed: ' + (err?.message || err))
+          }
+        })
+        downloadBtn.addEventListener('click', () => {
+          updateSaveTextarea()
+          const blob = new Blob([saveTextarea.value], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = 'circuit.json'
+          a.click()
+          URL.revokeObjectURL(url)
+        })
+        applyLoadBtn.addEventListener('click', handleLoad)
+      }
+
+      function buildSpotlightItems() {
+        const items = []
+        Object.keys(TOOLS).forEach((type) => {
+          items.push({
+            id: `create-${type}`,
+            label: `Create ${type}`,
+            action: () => {
+              const centerGrid = {
+                x: Math.round((canvas.width / (2 * viewScale) - camera.x) / GRID_SIZE),
+                y: Math.round((canvas.height / (2 * viewScale) - camera.y) / GRID_SIZE),
+              }
+              placeFromPalette(centerGrid.x, centerGrid.y, type)
+              refreshHUD()
+            },
+          })
+        })
+        Object.keys(customLibrary).forEach((type) => {
+          items.push({
+            id: `create-${type}`,
+            label: `Create ${type}`,
+            action: () => {
+              const centerGrid = {
+                x: Math.round((canvas.width / (2 * viewScale) - camera.x) / GRID_SIZE),
+                y: Math.round((canvas.height / (2 * viewScale) - camera.y) / GRID_SIZE),
+              }
+              placeFromPalette(centerGrid.x, centerGrid.y, type)
+              refreshHUD()
+            },
+          })
+        })
+        components.forEach((c) => {
+          items.push({
+            id: c.id,
+            label: `Jump to ${c.type} (${c.id})`,
+            action: () => centerCameraOnGrid(c.gx + c.w / 2, c.gy + c.h / 2),
+          })
+        })
+        items.push({
+          id: 'clear',
+          label: 'Clear board',
+          action: () => {
+            clearAllState()
+            refreshHUD()
+          },
+        })
+        return items
+      }
+
+      function renderSpotlightResults(query = '') {
+        spotlightResults.innerHTML = ''
+        const q = query.toLowerCase()
+        const results = buildSpotlightItems()
+          .filter((item) => item.label.toLowerCase().includes(q))
+          .slice(0, 12)
+        results.forEach((item) => {
+          const btn = document.createElement('button')
+          btn.innerText = item.label
+          btn.onclick = () => {
+            item.action()
+            closeSpotlight()
+          }
+          spotlightResults.appendChild(btn)
+        })
+        if (!results.length) {
+          const empty = document.createElement('div')
+          empty.style.color = '#94a3b8'
+          empty.style.fontSize = '12px'
+          empty.innerText = 'No matches'
+          spotlightResults.appendChild(empty)
+        }
+      }
+
+      function openSpotlight() {
+        spotlightOpen = true
+        spotlightBackdrop.classList.remove('hidden')
+        spotlightInput.value = ''
+        renderSpotlightResults('')
+        spotlightInput.focus()
+      }
+
+      function closeSpotlight() {
+        spotlightOpen = false
+        spotlightBackdrop.classList.add('hidden')
+      }
+
+      spotlightInput.addEventListener('input', (e) => {
+        renderSpotlightResults(e.target.value || '')
+      })
+
+      spotlightInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          closeSpotlight()
+          return
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          const first = spotlightResults.querySelector('button')
+          if (first) first.click()
+        }
+      })
+
+      spotlightBackdrop.addEventListener('pointerdown', (e) => {
+        if (e.target === spotlightBackdrop) {
+          closeSpotlight()
+        }
+      })
+
+      function openShortcutModal() {
+        shortcutBuffer = { ...shortcutMap }
+        renderShortcutModal()
+        shortcutBackdrop.classList.remove('hidden')
+        shortcutOpen = true
+      }
+
+      function closeShortcutModal() {
+        persistShortcuts(shortcutBuffer)
+        shortcutBackdrop.classList.add('hidden')
+        shortcutOpen = false
+      }
+
+      function renderShortcutModal() {
+        shortcutList.innerHTML = ''
+        Object.keys(DEFAULT_SHORTCUTS).forEach((action) => {
+          const row = document.createElement('div')
+          row.className = 'shortcut-row'
+          const label = document.createElement('span')
+          label.textContent = action.toUpperCase()
+          label.style.width = '110px'
+          const input = document.createElement('input')
+          input.className = 'themed-input'
+          input.value = shortcutBuffer[action] || ''
+          input.onchange = (e) => {
+            shortcutBuffer[action] = normalizeKeyBinding(e.target.value)
+          }
+          row.appendChild(label)
+          row.appendChild(input)
+          shortcutList.appendChild(row)
+        })
+      }
+
+      shortcutClose.addEventListener('click', closeShortcutModal)
+      shortcutBackdrop.addEventListener('pointerdown', (e) => {
+        if (e.target === shortcutBackdrop) {
+          closeShortcutModal()
+        }
+      })
+
+      shortcutExport.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(shortcutMap, null, 2))
+        } catch (err) {
+          alert('Copy failed')
+        }
+      })
+
+      shortcutImport.addEventListener('click', () => {
+        const next = prompt('Paste shortcuts JSON', JSON.stringify(shortcutMap, null, 2))
+        if (!next) return
+        try {
+          const parsed = JSON.parse(next)
+          persistShortcuts(parsed)
+          renderShortcutModal()
+        } catch (err) {
+          alert('Invalid JSON')
+        }
+      })
+
+      shortcutReset.addEventListener('click', () => {
+        persistShortcuts(DEFAULT_SHORTCUTS)
+        renderShortcutModal()
+      })
+
+      shortcutList.addEventListener('change', () => {
+        persistShortcuts(shortcutBuffer)
+      })
+
+      function handleDoubleClick(e) {
+        const g = getGrid({ x: e.clientX, y: e.clientY })
+        const compHit = componentAt(g.x, g.y)
+        if (compHit && customLibrary[compHit.type]) {
+          enterCustomEdit(compHit.type)
+          return
+        }
+        if (currentContext.type === 'custom') {
+          exitCustomEdit()
+        }
+      }
+
+      canvas.addEventListener('pointerdown', (e) => {
+        const scenePos = clientToScene({ x: e.clientX, y: e.clientY })
+        lastPointerScene = scenePos
+        const g = getGrid({ x: e.clientX, y: e.clientY })
+        const portHit = hitTestPort(e.clientX, e.clientY)
+        const wireHit = hitTestWire(e.clientX, e.clientY)
+        hideContextMenu()
+
+        if (mode === 'SELECTING') {
+          selectionStart = g
+          selectionEnd = g
+          return
+        }
+
+        if (draggingFromMenu) return
+
+        if (!portHit && wireHit) {
+          toggleProbe(wireHit)
+          return
+        }
+
+        if (portHit) {
+          if (e.button === 2) {
+            showContextMenu(e.clientX, e.clientY, [])
+            return
+          }
+          draggingWireStart = portHit
+          mode = 'CONNECTING'
+          return
+        }
+
+        const compHit = componentAt(g.x, g.y)
+        if (compHit) {
+          if (compHit.type === 'INPUT' && e.button !== 2) {
+            const compRect = {
+              x: compHit.gx * GRID_SIZE + camera.x,
+              y: compHit.gy * GRID_SIZE + camera.y,
+              w: compHit.w * GRID_SIZE,
+              h: compHit.h * GRID_SIZE,
+            }
+            const relX = scenePos.x - compRect.x
+            const relY = scenePos.y - compRect.y
+            const pad = 8
+            if (
+              relX > pad &&
+              relX < compRect.w - pad &&
+              relY > pad &&
+              relY < compRect.h - pad
+            ) {
+              compHit.state = !compHit.state
+              queueComponent(compHit, 0)
+              return
+            }
+          }
+          mode = 'DRAGGING_EXISTING'
+          draggingComp = compHit
+          dragOffset = { x: g.x - compHit.gx, y: g.y - compHit.gy }
+          draggingComp.initialPos = { gx: compHit.gx, gy: compHit.gy }
+          return
+        }
+
+        if (placingType) {
+          if (!checkCollision(g.x, g.y, placingType)) {
+            components.push(new Component(g.x, g.y, placingType))
+          }
+          return
+        }
+
+        mode = 'PANNING'
+        dragStart = { x: scenePos.x - camera.x, y: scenePos.y - camera.y }
+      })
+
+      window.addEventListener('pointermove', (e) => {
+        const scenePos = clientToScene({ x: e.clientX, y: e.clientY })
+        lastPointerScene = scenePos
+        mouseGrid = getGrid({ x: e.clientX, y: e.clientY })
+        hoverPort = hitTestPort(e.clientX, e.clientY)
+        if (mode === 'SELECTING' && selectionStart) {
+          selectionEnd = mouseGrid
+        }
+        if (mode === 'PANNING') {
+          camera.x = scenePos.x - dragStart.x
+          camera.y = scenePos.y - dragStart.y
+        } else if (mode === 'DRAGGING_EXISTING' && draggingComp) {
+          draggingComp.gx = mouseGrid.x - dragOffset.x
+          draggingComp.gy = mouseGrid.y - dragOffset.y
+        }
+        if (minimapDragging) {
+          handleMinimapNav(e)
+        }
+      })
+
+      window.addEventListener('pointerup', () => {
+        if (draggingFromMenu && placingType) {
+          placeFromPalette(mouseGrid.x, mouseGrid.y, placingType)
+          draggingFromMenu = false
+          placingType = null
+        }
+        minimapDragging = false
+
+        if (mode === 'SELECTING' && selectionStart) {
+          const sx = Math.min(selectionStart.x, selectionEnd?.x ?? selectionStart.x)
+          const ex = Math.max(selectionStart.x, selectionEnd?.x ?? selectionStart.x)
+          const sy = Math.min(selectionStart.y, selectionEnd?.y ?? selectionStart.y)
+          const ey = Math.max(selectionStart.y, selectionEnd?.y ?? selectionStart.y)
+          selectedComponents = components.filter((c) => {
+            return (
+              c.gx >= sx &&
+              c.gx + c.w <= ex + 1 &&
+              c.gy >= sy &&
+              c.gy + c.h <= ey + 1
+            )
+          })
+          selectionStart = null
+          selectionEnd = null
+          mode = 'IDLE'
+        }
+
+        if (mode === 'CONNECTING' && draggingWireStart) {
+          const endPort = hoverPort
+          if (endPort && endPort !== draggingWireStart) {
+            tryConnectPorts(draggingWireStart, endPort)
+          }
+        }
+
+        if (mode === 'DRAGGING_EXISTING' && draggingComp) {
+          const moved =
+            draggingComp.gx !== draggingComp.initialPos.gx ||
+            draggingComp.gy !== draggingComp.initialPos.gy
+          if (
+            checkCollision(
+              draggingComp.gx,
+              draggingComp.gy,
+              draggingComp.type,
+              draggingComp.id
+            )
+          ) {
+            draggingComp.gx = draggingComp.initialPos.gx
+            draggingComp.gy = draggingComp.initialPos.gy
+          }
+          rerouteForComponent(draggingComp)
+          if (moved) pushHistoryState('move')
+        }
+
+        mode = 'IDLE'
+        draggingComp = null
+        draggingWireStart = null
+      })
+
+      window.addEventListener('contextmenu', (e) => {
+        e.preventDefault()
+        const g = getGrid({ x: e.clientX, y: e.clientY })
+        const wireHit = hitTestWire(e.clientX, e.clientY)
+        const compHit = componentAt(g.x, g.y)
+        const items = []
+        if (wireHit) {
+          items.push({
+            label: 'Delete wire',
+            action: () => {
+              probes.delete(wireHit.id)
+              wires = wires.filter((w) => w !== wireHit)
+              const dest = components.find((c) => c.id === wireHit.toCompId)
+              if (dest) queueComponent(dest, gateDelay(dest.type))
+              pushHistoryState('delete-wire')
+            },
+          })
+          items.push({
+            label: wireHit.showFlow ? 'Hide flow' : 'Show flow',
+            action: () => {
+              wireHit.showFlow = !wireHit.showFlow
+            },
+          })
+          items.push({
+            label: 'Set net name',
+            action: () => {
+              const next = prompt('Net name', wireHit.netName || '')
+              if (next !== null) {
+                wireHit.netName = next.trim() || null
+                pushHistoryState('net-name')
+              }
+            },
+          })
+        }
+        if (compHit) {
+          if (compHit.type === 'SPLITTER' || compHit.type === 'MERGER') {
+            items.push({
+              label: 'Set bus size',
+              action: () => {
+                const next = prompt(
+                  'Bus Width (1-64)',
+                  compHit.properties.busSize ?? 8
+                )
+                if (next !== null) {
+                  compHit.properties.busSize = clampBits(next, 8)
+                  configureComponent(compHit)
+                  pushHistoryState('prop-change')
+                }
+              },
+            })
+          }
+          if (compHit.properties.bitWidth !== undefined) {
+            items.push({
+              label: 'Set bit width',
+              action: () => {
+                const next = prompt(
+                  'Bit Width (1-64)',
+                  compHit.properties.bitWidth ?? 1
+                )
+                if (next !== null) {
+                  compHit.properties.bitWidth = clampBits(next, 1)
+                  configureComponent(compHit)
+                  pushHistoryState('prop-change')
+                }
+              },
+            })
+          }
+          if (compHit.type === 'RAM' || compHit.type === 'ROM') {
+            items.push({
+              label: 'Hex Editor',
+              action: () => openHexEditor(compHit),
+            })
+          }
+          items.push({
+            label: 'Delete component',
+            action: () => removeComponent(compHit),
+          })
+        }
+        if (!items.length) return
+        showContextMenu(e.clientX, e.clientY, items)
+      })
+
+      canvas.addEventListener('dblclick', handleDoubleClick)
+
+      function handleShortcutAction(action) {
+        switch (action) {
+          case 'wire': {
+            if (hoverPort) {
+              draggingWireStart = hoverPort
+              mode = 'CONNECTING'
+            }
+            break
+          }
+          case 'rotate':
+            rotateSelection()
+            break
+          case 'remove':
+            removeSelection()
+            break
+          case 'toggle':
+            toggleSelectionState()
+            break
+          case 'select':
+            mode = mode === 'SELECTING' ? 'IDLE' : 'SELECTING'
+            refreshHUD()
+            break
+        }
+      }
+
+      window.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+          e.preventDefault()
+          if (e.shiftKey) {
+            redoEdit()
+          } else {
+            undoEdit()
+          }
+          return
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+          e.preventDefault()
+          if (spotlightOpen) closeSpotlight()
+          else openSpotlight()
+          return
+        }
+        if (spotlightOpen) return
+        if (shortcutOpen) return
+        const tag = (e.target?.tagName || '').toLowerCase()
+        if (
+          tag === 'input' ||
+          tag === 'textarea' ||
+          e.target?.isContentEditable ||
+          e.target?.contentEditable === 'true'
+        )
+          return
+        const action = findShortcutAction(e.key)
+        if (action) {
+          e.preventDefault()
+          handleShortcutAction(action)
+        }
+      })
+      window.addEventListener('resize', () => {
+        canvas.width = window.innerWidth
+        canvas.height = window.innerHeight
+        lastViewScale = Number.NaN
+      })
+
+      function apiLoad(json) {
+        const data = typeof json === 'string' ? JSON.parse(json) : json
+        loadProject(data)
+        return true
+      }
+
+      window.CircuitAPI = {
+        load: apiLoad,
+        tick: (count = 1) => stepSimulation(count),
+        isPaused: () => isPaused,
+        getViewState: () => getViewState(),
+        setZoom: (z) => {
+          setZoom(z)
+          return getViewState()
+        },
+        zoomToSelection: () => {
+          zoomToSelection()
+          return getViewState()
+        },
+        readComponent: (id) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return null
+          return {
+            id: comp.id,
+            type: comp.type,
+            state: comp.state,
+            isLit: comp.isLit,
+            properties: { ...comp.properties },
+            inputs: comp.inputs.map((p) => ({ id: p.id, value: p.value })),
+            outputs: comp.outputs.map((p) => ({ id: p.id, value: p.value })),
+          }
+        },
+        getWires: () =>
+          wires.map((w) => ({
+            id: w.id,
+            from: { comp: w.fromCompId, port: w.fromPortId },
+            to: { comp: w.toCompId, port: w.toPortId },
+            bitWidth: w.bitWidth,
+            value: w.value,
+            showFlow: !!w.showFlow,
+            netName: w.netName || null,
+            bundle: w.bundle || null,
+          })),
+        addBreakpoint: (expr) => addBreakpoint(expr),
+        listBreakpoints: () => listBreakpoints(),
+        removeBreakpoint: (id) => removeBreakpoint(id),
+        setBreakpointEnabled: (id, enabled) => setBreakpointEnabled(id, enabled),
+        clearBreakpoints: () => {
+          clearBreakpoints()
+          return true
+        },
+        toggleWireFlow: (id, enable) => {
+          const wire = wires.find((w) => w.id === id)
+          if (!wire) return false
+          wire.showFlow = enable === undefined ? !wire.showFlow : Boolean(enable)
+          return true
+        },
+        setNetName: (id, name) => {
+          const wire = wires.find((w) => w.id === id)
+          if (!wire) return false
+          wire.netName = name ? String(name) : null
+          return true
+        },
+        getNetName: (id) => wires.find((w) => w.id === id)?.netName || null,
+        listNets: () => {
+          const nets = new Map()
+          wires.forEach((w) => {
+            if (!w.netName) return
+            if (!nets.has(w.netName)) nets.set(w.netName, [])
+            nets.get(w.netName).push(w.id)
+          })
+          return Array.from(nets.entries()).map(([name, ids]) => ({ name, wires: ids }))
+        },
+        enableCoverage: (enable = true) => {
+          setCoverageEnabled(enable)
+          return coverageEnabled
+        },
+        clearCoverage: () => {
+          clearCoverage()
+          return true
+        },
+        getCoverageStats: () =>
+          Array.from(coverageStats.entries()).map(([id, count]) => ({ id, count })),
+        bundleWire: (wireId, name, width) => addWireToBundle(wireId, name, width),
+        unbundleWire: (wireId) => removeWireFromBundle(wireId),
+        listBundles: () => listBundles(),
+        createBundle: (name, width) => !!ensureBundle(name, width),
+        setSpeed: (hz) => setTickRate(hz),
+        pause: () => pauseSimulation(),
+        resume: () => resumeSimulation(),
+        registerCustomTool: (def) => registerCustomTool(def),
+        setInput: (id, value) => {
+          const comp = components.find((c) => c.id === id && c.type === 'INPUT')
+          if (!comp) return false
+          comp.state = Boolean(value)
+          if (value === null || value === undefined) {
+            comp.overrideValue = null
+          } else {
+            comp.overrideValue = BigInt(value)
+          }
+          queueComponent(comp, 0)
+          return true
+        },
+        exportVerilog: (moduleName) => exportVerilog(moduleName),
+        reset: () => {
+          clearAllState()
+        },
+        runDRC: () => runDRC(),
+        autoRouteAll: () => {
+          wires.forEach((w) => applyAutoRoute(w))
+          return true
+        },
+        loadMemory: (id, data) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return false
+          const mem = ensureMemory(comp)
+          if (Array.isArray(data) || data instanceof Uint8Array) {
+            mem.fill(0)
+            mem.set(
+              Array.from(data)
+                .map((v) => Number(v) & BYTE_MASK)
+                .slice(0, mem.length)
+            )
+            queueComponent(comp, 0)
+            return true
+          }
+          return false
+        },
+        dumpMemory: (id) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return []
+          return Array.from(ensureMemory(comp) || [])
+        },
+        openHexEditor: (id) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return false
+          openHexEditor(comp)
+          return true
+        },
+        assemble: (defs, source) => Array.from(assembleSource(defs, source)),
+        loadAssembly: (romId, defs, source) =>
+          Array.from(loadAssemblyIntoRom(romId, defs, source)),
+        getAssemblerState: () => ({ ...assemblerState }),
+        setTestbench: (seq) => {
+          setTestbenchScript(seq)
+          return true
+        },
+        runTestbench: (seq) => runTestbench(seq),
+        stopTestbench: () => {
+          stopTestbench()
+          return true
+        },
+        getTestbenchStatus: () => getTestbenchStatus(),
+        undo: () => undoEdit(),
+        redo: () => redoEdit(),
+        moveComponent: (id, gx, gy) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return false
+          const prev = { gx: comp.gx, gy: comp.gy }
+          comp.gx = Math.floor(gx)
+          comp.gy = Math.floor(gy)
+          rerouteForComponent(comp)
+          if (prev.gx !== comp.gx || prev.gy !== comp.gy) pushHistoryState('move')
+          return true
+        },
+        setFSM: (id, def) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return false
+          comp.properties.fsm = def
+          configureComponent(comp)
+          return true
+        },
+        getFSM: (id) => {
+          const comp = components.find((c) => c.id === id)
+          if (!comp) return null
+          return normalizeFsmDefinition(comp.properties.fsm)
+        },
+        synthesizeFSM: (def) => synthesizeFSM(def),
+        enterCustomEdit: (name) => enterCustomEdit(name),
+        exitCustomEdit: () => exitCustomEdit(),
+        openSpotlight: () => {
+          openSpotlight()
+          return true
+        },
+        setShortcuts: (map) => {
+          persistShortcuts(map || {})
+          shortcutBuffer = { ...shortcutMap }
+          return { ...shortcutMap }
+        },
+        getShortcuts: () => ({ ...shortcutMap }),
+        selectComponents: (ids = []) => {
+          selectedComponents = components.filter((c) => ids.includes(c.id))
+          return selectedComponents.length
+        },
+        getCamera: () => ({ ...camera }),
+      }
+
+      function init() {
+        canvas.width = window.innerWidth
+        canvas.height = window.innerHeight
+        refreshHUD()
+        initModalEvents()
+        pushHistoryState('init')
+        tickOnce()
+        startTickLoop()
+        render()
+      }
+
+      if (!document.__isFake) {
+        init()
+      }
+
+      if (typeof window !== 'undefined') {
+        window.Component = Component
+        window.Wire = Wire
+        window.components = components
+        window.wires = wires
+      }
+
+      if (typeof module !== 'undefined' && module.exports) {
+        module.exports = {
+          CircuitAPI: window.CircuitAPI,
+          Component,
+          Wire,
+          components,
+          wires,
+          init,
+        }
+      }

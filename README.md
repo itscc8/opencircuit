@@ -65,4 +65,14 @@ The simulation runs on a discrete tick loop decoupled from rendering. Each tick 
 * `setInput(id, value)`: programmatically drive an INPUT component (multi-bit supported via BigInt-friendly values).
 * `reset()`: clear the board.
 
+## CLI
+
+You can run OpenCircuit headlessly in Node by pointing the CLI at an exported project:
+
+```
+node cli.js fixtures/not_loop.json --ticks 5
+```
+
+After loading and ticking, the CLI prints the value of every OUTPUT component.
+
 ---
