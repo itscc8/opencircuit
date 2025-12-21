@@ -312,7 +312,7 @@ test.describe('Discrete tick simulation', () => {
     await expect(page.getByRole('button', { name: /Pause|Resume/ })).toHaveCount(0)
     await expect(page.getByRole('button', { name: /Run DRC/ })).toHaveCount(0)
     await expect(page.getByText('Coverage Heatmap')).toHaveCount(0)
-    const romButton = page.locator('#hud button', { hasText: /^ROM$/ })
+    const romButton = page.getByRole('button', { name: 'ROM', exact: true })
     await expect(romButton).toHaveCount(0)
 
     await page.getByRole('button', { name: 'Pro' }).click()

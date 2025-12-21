@@ -335,6 +335,9 @@ const canvas = document.getElementById('canvas')
           logicAnalyzer.enabled = false
           logicAnalyzer.triggerWire = null
           logicAnalyzer.triggered = true
+          laCanvas.style.display = 'none'
+          laCtx.clearRect(0, 0, laCanvas.width, laCanvas.height)
+          minimapCtx.clearRect(0, 0, minimapCanvas.width, minimapCanvas.height)
           setCoverageEnabled(false)
           clearBreakpoints()
           lastBreakpointHit = null
@@ -2395,7 +2398,6 @@ const canvas = document.getElementById('canvas')
           drawLogicAnalyzer()
         } else {
           laCanvas.style.display = 'none'
-          laCtx.clearRect(0, 0, laCanvas.width, laCanvas.height)
         }
         if (selectionStart && selectionEnd) {
           const sx = Math.min(selectionStart.x, selectionEnd.x) * GRID_SIZE + camera.x
@@ -2413,8 +2415,6 @@ const canvas = document.getElementById('canvas')
         requestAnimationFrame(render)
         if (proMode) {
           drawMinimap()
-        } else {
-          minimapCtx.clearRect(0, 0, minimapCanvas.width, minimapCanvas.height)
         }
       }
 
@@ -3451,7 +3451,7 @@ const canvas = document.getElementById('canvas')
       }
 
       function assembleSource(defs, source) {
-        if (!proMode) throw new Error('Assembler unavailable in Easy mode')
+        if (!proMode) throw new Error('Assembler is available in Pro mode only')
         const isa = normalizeIsaDefinitions(defs)
         const src = typeof source === 'string' ? source : ''
         const bytes = []
@@ -3538,7 +3538,7 @@ const canvas = document.getElementById('canvas')
       }
 
       function exportVerilog(moduleName = 'circuit') {
-        if (!proMode) throw new Error('Verilog export available in Pro mode')
+        if (!proMode) throw new Error('Verilog export is available in Pro mode only')
         const modName = sanitizeId(moduleName)
         const compById = new Map(components.map((c) => [c.id, c]))
         const wireToInput = new Map()
