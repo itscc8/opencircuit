@@ -168,17 +168,9 @@ const canvas = document.getElementById('canvas')
       }
 
       // Basic gates available when Easy mode is active.
-      const BASIC_TOOL_KEYS = new Set([
-        'INPUT',
-        'OUTPUT',
-        'NOT',
-        'AND',
-        'NAND',
-        'OR',
-        'NOR',
-        'XOR',
-        'XNOR',
-      ])
+      const MODE_STORAGE_KEY = 'oc_mode'
+      // Easy mode keeps all logic tools available except explicitly disabled advanced parts.
+      const EASY_DISABLED_TOOLS = new Set(['ROM'])
       let proMode = true
       let components = []
       let wires = []
@@ -316,14 +308,57 @@ const canvas = document.getElementById('canvas')
         }
       }
 
+      function loadModePreference() {
+        try {
+          const saved = localStorage.getItem(MODE_STORAGE_KEY)
+          if (saved === 'pro') return true
+          if (saved === 'easy') return false
+        } catch (err) {
+          console.warn('Mode load failed', err)
+        }
+        return false
+      }
+
+      function persistModePreference() {
+        try {
+          localStorage.setItem(MODE_STORAGE_KEY, proMode ? 'pro' : 'easy')
+        } catch (err) {
+          console.warn('Mode save failed', err)
+        }
+      }
+
+      function applyModeSettings() {
+        updateModeButtons()
+        minimapCanvas.style.display = proMode ? 'block' : 'none'
+        if (!proMode) {
+          isPaused = false
+          logicAnalyzer.enabled = false
+          logicAnalyzer.triggerWire = null
+          logicAnalyzer.triggered = true
+          laCanvas.style.display = 'none'
+          laCtx.clearRect(0, 0, laCanvas.width, laCanvas.height)
+          minimapCtx.clearRect(0, 0, minimapCanvas.width, minimapCanvas.height)
+          setCoverageEnabled(false)
+          clearBreakpoints()
+          lastBreakpointHit = null
+          drcFindings = []
+          testbench.running = false
+          testbench.stopRequested = false
+        }
+      }
+
       // Returns true if a tool should be available in the current mode.
+      // Easy mode keeps logic tools accessible while filtering explicit advanced components.
       function toolEnabled(key) {
-        return proMode || BASIC_TOOL_KEYS.has(key) || !!customLibrary[key]
+        if (customLibrary[key]) return true
+        if (proMode) return true
+        return !EASY_DISABLED_TOOLS.has(key)
       }
 
       function setMode(isPro) {
         proMode = !!isPro
-        updateModeButtons()
+        persistModePreference()
+        applyModeSettings()
         refreshHUD()
       }
 
@@ -523,6 +558,10 @@ const canvas = document.getElementById('canvas')
       }
 
       function runDRC() {
+        if (!proMode) {
+          drcFindings = []
+          return drcFindings
+        }
         const warnings = []
         const driverMap = new Map()
         wires.forEach((w) => {
@@ -599,10 +638,8 @@ const canvas = document.getElementById('canvas')
       }
 
       function setCoverageEnabled(enable) {
-        coverageEnabled = !!enable
-        if (coverageEnabled) {
-          clearCoverage()
-        }
+        coverageEnabled = proMode && !!enable
+        clearCoverage()
       }
 
       function seedInitialEvents() {
@@ -1636,6 +1673,10 @@ const canvas = document.getElementById('canvas')
       }
 
       function runTestbench(sequence) {
+        if (!proMode) {
+          testbench.lastResult = null
+          return { passed: false, failures: [], ticks: 0, stopped: true }
+        }
         const steps = normalizeTestbenchSequence(sequence ?? testbench.script)
         testbench.stopRequested = false
         testbench.running = true
@@ -1700,6 +1741,7 @@ const canvas = document.getElementById('canvas')
       }
 
       function setTestbenchScript(seq) {
+        if (!proMode) return []
         const parsed = normalizeTestbenchSequence(seq)
         testbench.script = JSON.stringify(parsed, null, 2)
         return parsed
@@ -2352,7 +2394,11 @@ const canvas = document.getElementById('canvas')
         drawWires()
         drawAllComponents()
         drawSpotlightGhost()
-        drawLogicAnalyzer()
+        if (proMode) {
+          drawLogicAnalyzer()
+        } else {
+          laCanvas.style.display = 'none'
+        }
         if (selectionStart && selectionEnd) {
           const sx = Math.min(selectionStart.x, selectionEnd.x) * GRID_SIZE + camera.x
           const sy = Math.min(selectionStart.y, selectionEnd.y) * GRID_SIZE + camera.y
@@ -2367,7 +2413,9 @@ const canvas = document.getElementById('canvas')
           ctx.fillRect(sx, sy, ex - sx, ey - sy)
         }
         requestAnimationFrame(render)
-        drawMinimap()
+        if (proMode) {
+          drawMinimap()
+        }
       }
 
       function refreshHUD() {
@@ -2387,12 +2435,14 @@ const canvas = document.getElementById('canvas')
         modalBtn.onclick = () => openModal('save')
         hud.appendChild(modalBtn)
 
-        const verilogBtn = document.createElement('button')
-        verilogBtn.className = 'action'
-        verilogBtn.id = 'btn-export-verilog'
-        verilogBtn.innerText = 'Export Verilog'
-        verilogBtn.onclick = () => downloadVerilog()
-        hud.appendChild(verilogBtn)
+        if (proMode) {
+          const verilogBtn = document.createElement('button')
+          verilogBtn.className = 'action'
+          verilogBtn.id = 'btn-export-verilog'
+          verilogBtn.innerText = 'Export Verilog'
+          verilogBtn.onclick = () => downloadVerilog()
+          hud.appendChild(verilogBtn)
+        }
 
         const spotlightBtn = document.createElement('button')
         spotlightBtn.className = 'action'
@@ -2400,104 +2450,110 @@ const canvas = document.getElementById('canvas')
         spotlightBtn.onclick = () => openSpotlight()
         hud.appendChild(spotlightBtn)
 
-        const pauseBtn = document.createElement('button')
-        pauseBtn.className = 'action'
-        pauseBtn.innerText = isPaused ? 'Resume' : 'Pause'
-        pauseBtn.onclick = togglePause
-        hud.appendChild(pauseBtn)
+        if (proMode) {
+          const pauseBtn = document.createElement('button')
+          pauseBtn.className = 'action'
+          pauseBtn.innerText = isPaused ? 'Resume' : 'Pause'
+          pauseBtn.onclick = togglePause
+          hud.appendChild(pauseBtn)
 
-        const stepBtn = document.createElement('button')
-        stepBtn.className = isPaused ? 'action' : 'action disabled'
-        stepBtn.innerText = 'Step (1 Tick)'
-        stepBtn.disabled = !isPaused
-        stepBtn.onclick = () => stepSimulation(1)
-        hud.appendChild(stepBtn)
-
-        const bpLabel = document.createElement('div')
-        bpLabel.style.fontSize = '11px'
-        bpLabel.style.color = '#cbd5f5'
-        bpLabel.textContent = 'Conditional Breakpoints'
-        hud.appendChild(bpLabel)
-        const bpRow = document.createElement('div')
-        bpRow.style.display = 'flex'
-        bpRow.style.gap = '6px'
-        bpRow.style.flexWrap = 'wrap'
-        const bpInput = document.createElement('input')
-        bpInput.className = 'themed-input'
-        bpInput.placeholder = 'PC==0xA0'
-        bpInput.style.flex = '1'
-        const bpAdd = document.createElement('button')
-        bpAdd.className = 'action'
-        bpAdd.innerText = 'Add BP'
-        bpAdd.onclick = () => {
-          if (bpInput.value.trim()) {
-            addBreakpoint(bpInput.value.trim())
-            bpInput.value = ''
-            refreshHUD()
-          }
+          const stepBtn = document.createElement('button')
+          stepBtn.className = isPaused ? 'action' : 'action disabled'
+          stepBtn.innerText = 'Step (1 Tick)'
+          stepBtn.disabled = !isPaused
+          stepBtn.onclick = () => stepSimulation(1)
+          hud.appendChild(stepBtn)
         }
-        bpRow.appendChild(bpInput)
-        bpRow.appendChild(bpAdd)
-        hud.appendChild(bpRow)
 
-        const bpList = document.createElement('div')
-        bpList.id = 'breakpoint-list'
-        bpList.style.display = 'flex'
-        bpList.style.flexDirection = 'column'
-        bpList.style.gap = '4px'
-        listBreakpoints().forEach((bp) => {
-          const row = document.createElement('div')
-          row.style.display = 'flex'
-          row.style.alignItems = 'center'
-          row.style.gap = '6px'
-          row.style.padding = '6px'
-          row.style.border = '1px solid #222'
-          row.style.borderRadius = '4px'
-          if (bp.hitAt !== null) row.classList.add('hit')
-          row.style.background = bp.hitAt !== null ? '#1f2937' : '#0b0b0b'
-          const enable = document.createElement('input')
-          enable.type = 'checkbox'
-          enable.checked = bp.enabled
-          enable.onchange = (e) => {
-            setBreakpointEnabled(bp.id, e.target.checked)
-            refreshHUD()
+        if (proMode) {
+          const bpLabel = document.createElement('div')
+          bpLabel.style.fontSize = '11px'
+          bpLabel.style.color = '#cbd5f5'
+          bpLabel.textContent = 'Conditional Breakpoints'
+          hud.appendChild(bpLabel)
+          const bpRow = document.createElement('div')
+          bpRow.style.display = 'flex'
+          bpRow.style.gap = '6px'
+          bpRow.style.flexWrap = 'wrap'
+          const bpInput = document.createElement('input')
+          bpInput.className = 'themed-input'
+          bpInput.placeholder = 'PC==0xA0'
+          bpInput.style.flex = '1'
+          const bpAdd = document.createElement('button')
+          bpAdd.className = 'action'
+          bpAdd.innerText = 'Add BP'
+          bpAdd.onclick = () => {
+            if (bpInput.value.trim()) {
+              addBreakpoint(bpInput.value.trim())
+              bpInput.value = ''
+              refreshHUD()
+            }
           }
-          const text = document.createElement('span')
-          text.textContent = bp.expr
-          text.style.flex = '1'
-          text.style.fontSize = '11px'
-          text.style.color = '#e5e7eb'
-          const meta = document.createElement('span')
-          meta.style.fontSize = '10px'
-          meta.style.color = '#94a3b8'
-          meta.textContent = bp.hitAt !== null ? `hit@${bp.hitAt}` : 'idle'
-          const removeBtn = document.createElement('button')
-          removeBtn.innerText = '✕'
-          removeBtn.onclick = () => {
-            removeBreakpoint(bp.id)
-            refreshHUD()
-          }
-          row.appendChild(enable)
-          row.appendChild(text)
-          row.appendChild(meta)
-          row.appendChild(removeBtn)
-          bpList.appendChild(row)
-        })
-        hud.appendChild(bpList)
+          bpRow.appendChild(bpInput)
+          bpRow.appendChild(bpAdd)
+          hud.appendChild(bpRow)
 
-        const undoBtn = document.createElement('button')
-        undoBtn.className = 'action'
-        undoBtn.innerText = 'Undo'
-        undoBtn.disabled = historyIndex <= 0
-        undoBtn.onclick = undoEdit
-        hud.appendChild(undoBtn)
+          const bpList = document.createElement('div')
+          bpList.id = 'breakpoint-list'
+          bpList.style.display = 'flex'
+          bpList.style.flexDirection = 'column'
+          bpList.style.gap = '4px'
+          listBreakpoints().forEach((bp) => {
+            const row = document.createElement('div')
+            row.style.display = 'flex'
+            row.style.alignItems = 'center'
+            row.style.gap = '6px'
+            row.style.padding = '6px'
+            row.style.border = '1px solid #222'
+            row.style.borderRadius = '4px'
+            if (bp.hitAt !== null) row.classList.add('hit')
+            row.style.background = bp.hitAt !== null ? '#1f2937' : '#0b0b0b'
+            const enable = document.createElement('input')
+            enable.type = 'checkbox'
+            enable.checked = bp.enabled
+            enable.onchange = (e) => {
+              setBreakpointEnabled(bp.id, e.target.checked)
+              refreshHUD()
+            }
+            const text = document.createElement('span')
+            text.textContent = bp.expr
+            text.style.flex = '1'
+            text.style.fontSize = '11px'
+            text.style.color = '#e5e7eb'
+            const meta = document.createElement('span')
+            meta.style.fontSize = '10px'
+            meta.style.color = '#94a3b8'
+            meta.textContent = bp.hitAt !== null ? `hit@${bp.hitAt}` : 'idle'
+            const removeBtn = document.createElement('button')
+            removeBtn.innerText = '✕'
+            removeBtn.onclick = () => {
+              removeBreakpoint(bp.id)
+              refreshHUD()
+            }
+            row.appendChild(enable)
+            row.appendChild(text)
+            row.appendChild(meta)
+            row.appendChild(removeBtn)
+            bpList.appendChild(row)
+          })
+          hud.appendChild(bpList)
+        }
 
-        const redoBtn = document.createElement('button')
-        redoBtn.className = 'action'
-        redoBtn.innerText = 'Redo'
-        redoBtn.disabled = historyIndex >= historyStack.length - 1
-        redoBtn.onclick = redoEdit
-        hud.appendChild(redoBtn)
+        if (proMode) {
+          const undoBtn = document.createElement('button')
+          undoBtn.className = 'action'
+          undoBtn.innerText = 'Undo'
+          undoBtn.disabled = historyIndex <= 0
+          undoBtn.onclick = undoEdit
+          hud.appendChild(undoBtn)
+
+          const redoBtn = document.createElement('button')
+          redoBtn.className = 'action'
+          redoBtn.innerText = 'Redo'
+          redoBtn.disabled = historyIndex >= historyStack.length - 1
+          redoBtn.onclick = redoEdit
+          hud.appendChild(redoBtn)
+        }
 
         const speedWrap = document.createElement('div')
         speedWrap.style.display = 'flex'
@@ -2548,287 +2604,291 @@ const canvas = document.getElementById('canvas')
         zoomWrap.appendChild(zoomFit)
         hud.appendChild(zoomWrap)
 
-        const laBtn = document.createElement('button')
-        laBtn.className = logicAnalyzer.enabled ? 'action active' : 'action'
-        laBtn.innerText = 'Logic Analyzer'
-        laBtn.onclick = () => {
-          logicAnalyzer.enabled = !logicAnalyzer.enabled
-          refreshHUD()
-        }
-        hud.appendChild(laBtn)
+        if (proMode) {
+          const laBtn = document.createElement('button')
+          laBtn.className = logicAnalyzer.enabled ? 'action active' : 'action'
+          laBtn.innerText = 'Logic Analyzer'
+          laBtn.onclick = () => {
+            logicAnalyzer.enabled = !logicAnalyzer.enabled
+            refreshHUD()
+          }
+          hud.appendChild(laBtn)
 
-        const laSelect = document.createElement('select')
-        laSelect.style.width = '100%'
-        laSelect.className = 'themed-input'
-        laSelect.id = 'logic-trigger-select'
-        laSelect.onchange = (e) => {
-          logicAnalyzer.triggerWire = e.target.value || null
-          logicAnalyzer.triggered = logicAnalyzer.triggerWire ? false : true
-        }
-        const noneOpt = document.createElement('option')
-        noneOpt.value = ''
-        noneOpt.textContent = 'Trigger: none'
-        laSelect.appendChild(noneOpt)
-        probes.forEach((_, id) => {
-          const opt = document.createElement('option')
-          opt.value = id
-          opt.textContent = `Trigger: ${id}`
-          if (logicAnalyzer.triggerWire === id) opt.selected = true
-          laSelect.appendChild(opt)
-        })
-        hud.appendChild(laSelect)
-
-        const flowBtn = document.createElement('button')
-        flowBtn.className = 'action'
-        flowBtn.id = 'btn-flow-preview'
-        flowBtn.innerText = 'Show Flow'
-        flowBtn.onclick = (e) => showFlowPreview(e.currentTarget)
-        hud.appendChild(flowBtn)
-
-        const drcBtn = document.createElement('button')
-        drcBtn.className = 'action'
-        drcBtn.innerText = `Run DRC (${drcFindings.length})`
-        drcBtn.onclick = () => {
-          runDRC()
-          refreshHUD()
-        }
-        hud.appendChild(drcBtn)
-        if (drcFindings.length) {
-          const drcList = document.createElement('div')
-          drcList.style.fontSize = '11px'
-          drcList.style.color = '#f97316'
-          drcList.style.display = 'flex'
-          drcList.style.flexDirection = 'column'
-          drcList.style.gap = '4px'
-          drcFindings.slice(0, MAX_DRC_DISPLAY_COUNT).forEach((f) => {
-            const row = document.createElement('div')
-            row.textContent = `⚠ ${f.message}`
-            drcList.appendChild(row)
+          const laSelect = document.createElement('select')
+          laSelect.style.width = '100%'
+          laSelect.className = 'themed-input'
+          laSelect.id = 'logic-trigger-select'
+          laSelect.onchange = (e) => {
+            logicAnalyzer.triggerWire = e.target.value || null
+            logicAnalyzer.triggered = logicAnalyzer.triggerWire ? false : true
+          }
+          const noneOpt = document.createElement('option')
+          noneOpt.value = ''
+          noneOpt.textContent = 'Trigger: none'
+          laSelect.appendChild(noneOpt)
+          probes.forEach((_, id) => {
+            const opt = document.createElement('option')
+            opt.value = id
+            opt.textContent = `Trigger: ${id}`
+            if (logicAnalyzer.triggerWire === id) opt.selected = true
+            laSelect.appendChild(opt)
           })
-          hud.appendChild(drcList)
-        }
+          hud.appendChild(laSelect)
 
-        const covLabel = document.createElement('div')
-        covLabel.style.fontSize = '11px'
-        covLabel.style.color = '#cbd5f5'
-        covLabel.textContent = 'Coverage Heatmap'
-        hud.appendChild(covLabel)
+          const flowBtn = document.createElement('button')
+          flowBtn.className = 'action'
+          flowBtn.id = 'btn-flow-preview'
+          flowBtn.innerText = 'Show Flow'
+          flowBtn.onclick = (e) => showFlowPreview(e.currentTarget)
+          hud.appendChild(flowBtn)
 
-        const covBtn = document.createElement('button')
-        covBtn.className = coverageEnabled ? 'action active' : 'action'
-        covBtn.innerText = coverageEnabled ? 'Coverage On' : 'Coverage Off'
-        covBtn.onclick = () => {
-          setCoverageEnabled(!coverageEnabled)
-          refreshHUD()
-        }
-        hud.appendChild(covBtn)
-
-        const covLegend = document.createElement('div')
-        covLegend.style.display = 'flex'
-        covLegend.style.gap = '8px'
-        covLegend.style.fontSize = '10px'
-        covLegend.style.color = '#94a3b8'
-        ;[
-          ['#4b5563', 'Never'],
-          ['#22c55e', 'Active'],
-          ['#ef4444', 'Hot'],
-        ].forEach(([color, label]) => {
-          const row = document.createElement('span')
-          row.style.display = 'flex'
-          row.style.alignItems = 'center'
-          row.style.gap = '4px'
-          const sw = document.createElement('span')
-          sw.className = 'swatch'
-          sw.style.backgroundColor = color
-          row.appendChild(sw)
-          row.appendChild(document.createTextNode(label))
-          covLegend.appendChild(row)
-        })
-        hud.appendChild(covLegend)
-
-        const covClear = document.createElement('button')
-        covClear.className = 'action'
-        covClear.innerText = 'Clear Coverage'
-        covClear.onclick = () => {
-          clearCoverage()
-          refreshHUD()
-        }
-        hud.appendChild(covClear)
-
-        const bundleLabel = document.createElement('div')
-        bundleLabel.style.fontSize = '11px'
-        bundleLabel.style.color = '#cbd5f5'
-        bundleLabel.textContent = 'Bus Bundles'
-        hud.appendChild(bundleLabel)
-
-        const bundleBtn = document.createElement('button')
-        bundleBtn.className = 'action'
-        bundleBtn.innerText = 'Bundle wire...'
-        bundleBtn.onclick = () => {
-          const wireId = prompt('Wire id to bundle:')
-          if (!wireId) return
-          const width = parseInt(prompt('Bundle width:', '1') || '1', 10)
-          const name = prompt('Bundle name:', 'BUS')
-          if (!name) return
-          addWireToBundle(wireId, name, width)
-          refreshHUD()
-        }
-        hud.appendChild(bundleBtn)
-
-        const bundleList = document.createElement('div')
-        bundleList.style.fontSize = '10px'
-        bundleList.style.color = '#94a3b8'
-        bundleList.id = 'bundle-list'
-        listBundles().forEach((b) => {
-          const row = document.createElement('div')
-          row.textContent = `${b.name} (${b.width}-bit) [${b.members.length}]`
-          bundleList.appendChild(row)
-        })
-        hud.appendChild(bundleList)
-
-        const tbLabel = document.createElement('div')
-        tbLabel.style.fontSize = '11px'
-        tbLabel.style.color = '#cbd5f5'
-        tbLabel.textContent = 'Testbench Sequencer'
-        hud.appendChild(tbLabel)
-
-        const tbArea = document.createElement('textarea')
-        tbArea.className = 'themed-input'
-        tbArea.style.height = '90px'
-        tbArea.value = testbench.script
-        tbArea.onchange = (e) => {
-          try {
-            const parsed = setTestbenchScript(e.target.value)
-            tbStatus.textContent = `Loaded ${parsed.length} steps`
-            tbArea.value = testbench.script
-          } catch (err) {
-            tbStatus.textContent = 'Invalid sequence'
+          const drcBtn = document.createElement('button')
+          drcBtn.className = 'action'
+          drcBtn.innerText = `Run DRC (${drcFindings.length})`
+          drcBtn.onclick = () => {
+            runDRC()
+            refreshHUD()
+          }
+          hud.appendChild(drcBtn)
+          if (drcFindings.length) {
+            const drcList = document.createElement('div')
+            drcList.style.fontSize = '11px'
+            drcList.style.color = '#f97316'
+            drcList.style.display = 'flex'
+            drcList.style.flexDirection = 'column'
+            drcList.style.gap = '4px'
+            drcFindings.slice(0, MAX_DRC_DISPLAY_COUNT).forEach((f) => {
+              const row = document.createElement('div')
+              row.textContent = `⚠ ${f.message}`
+              drcList.appendChild(row)
+            })
+            hud.appendChild(drcList)
           }
         }
-        hud.appendChild(tbArea)
 
-        const tbButtons = document.createElement('div')
-        tbButtons.style.display = 'flex'
-        tbButtons.style.gap = '6px'
-        tbButtons.style.flexWrap = 'wrap'
+        if (proMode) {
+          const covLabel = document.createElement('div')
+          covLabel.style.fontSize = '11px'
+          covLabel.style.color = '#cbd5f5'
+          covLabel.textContent = 'Coverage Heatmap'
+          hud.appendChild(covLabel)
 
-        const tbRun = document.createElement('button')
-        tbRun.className = 'action'
-        tbRun.innerText = 'Run Sequence'
-        tbRun.onclick = () => {
-          try {
-            const parsed = setTestbenchScript(tbArea.value)
-            const res = runTestbench(parsed)
-            tbArea.value = testbench.script
-            tbStatus.textContent = res.passed
-              ? `PASS in ${res.ticks} ticks`
-              : `FAIL (${res.failures.length})`
-          } catch (err) {
-            tbStatus.textContent = 'Invalid sequence'
+          const covBtn = document.createElement('button')
+          covBtn.className = coverageEnabled ? 'action active' : 'action'
+          covBtn.innerText = coverageEnabled ? 'Coverage On' : 'Coverage Off'
+          covBtn.onclick = () => {
+            setCoverageEnabled(!coverageEnabled)
+            refreshHUD()
           }
-        }
-        tbButtons.appendChild(tbRun)
+          hud.appendChild(covBtn)
 
-        const tbStop = document.createElement('button')
-        tbStop.className = 'action'
-        tbStop.innerText = 'Stop'
-        tbStop.onclick = () => {
-          stopTestbench()
-          tbStatus.textContent = 'Stopped'
-        }
-        tbButtons.appendChild(tbStop)
+          const covLegend = document.createElement('div')
+          covLegend.style.display = 'flex'
+          covLegend.style.gap = '8px'
+          covLegend.style.fontSize = '10px'
+          covLegend.style.color = '#94a3b8'
+          ;[
+            ['#4b5563', 'Never'],
+            ['#22c55e', 'Active'],
+            ['#ef4444', 'Hot'],
+          ].forEach(([color, label]) => {
+            const row = document.createElement('span')
+            row.style.display = 'flex'
+            row.style.alignItems = 'center'
+            row.style.gap = '4px'
+            const sw = document.createElement('span')
+            sw.className = 'swatch'
+            sw.style.backgroundColor = color
+            row.appendChild(sw)
+            row.appendChild(document.createTextNode(label))
+            covLegend.appendChild(row)
+          })
+          hud.appendChild(covLegend)
 
-        const tbCopy = document.createElement('button')
-        tbCopy.className = 'action'
-        tbCopy.innerText = 'Copy Sequence'
-        tbCopy.onclick = async () => {
-          try {
-            await navigator.clipboard.writeText(testbench.script)
-          } catch (err) {
-            console.warn('Copy failed', err)
+          const covClear = document.createElement('button')
+          covClear.className = 'action'
+          covClear.innerText = 'Clear Coverage'
+          covClear.onclick = () => {
+            clearCoverage()
+            refreshHUD()
           }
-        }
-        tbButtons.appendChild(tbCopy)
-        hud.appendChild(tbButtons)
+          hud.appendChild(covClear)
 
-        const tbStatus = document.createElement('div')
-        tbStatus.style.fontSize = '11px'
-        tbStatus.style.color = '#aaa'
-        if (testbench.lastResult) {
-          tbStatus.textContent = testbench.lastResult.passed
-            ? `PASS in ${testbench.lastResult.ticks} ticks`
-            : `FAIL (${testbench.lastResult.failures.length})`
-        } else {
-          tbStatus.textContent = 'Idle'
-        }
-        hud.appendChild(tbStatus)
+          const bundleLabel = document.createElement('div')
+          bundleLabel.style.fontSize = '11px'
+          bundleLabel.style.color = '#cbd5f5'
+          bundleLabel.textContent = 'Bus Bundles'
+          hud.appendChild(bundleLabel)
 
-        const asmLabel = document.createElement('div')
-        asmLabel.style.fontSize = '11px'
-        asmLabel.style.color = '#cbd5f5'
-        asmLabel.textContent = 'Assembler & Hex'
-        hud.appendChild(asmLabel)
-
-        const isaArea = document.createElement('textarea')
-        isaArea.className = 'themed-input'
-        isaArea.style.height = '60px'
-        isaArea.id = 'asm-isa'
-        isaArea.value = assemblerState.isaText
-        isaArea.onchange = (e) => {
-          assemblerState.isaText = e.target.value
-        }
-        hud.appendChild(isaArea)
-
-        const asmArea = document.createElement('textarea')
-        asmArea.className = 'themed-input'
-        asmArea.style.height = '60px'
-        asmArea.id = 'asm-source'
-        asmArea.value = assemblerState.sourceText
-        asmArea.onchange = (e) => {
-          assemblerState.sourceText = e.target.value
-        }
-        hud.appendChild(asmArea)
-
-        const asmBtns = document.createElement('div')
-        asmBtns.className = 'asm-buttons'
-
-        const assembleBtn = document.createElement('button')
-        assembleBtn.className = 'action'
-        assembleBtn.innerText = 'Assemble'
-        assembleBtn.onclick = () => {
-          try {
-            assemblerState.lastBytes = Array.from(
-              assembleSource(assemblerState.isaText, assemblerState.sourceText) || []
-            )
-          } catch (err) {
-            alert(err?.message || 'Assembly failed')
+          const bundleBtn = document.createElement('button')
+          bundleBtn.className = 'action'
+          bundleBtn.innerText = 'Bundle wire...'
+          bundleBtn.onclick = () => {
+            const wireId = prompt('Wire id to bundle:')
+            if (!wireId) return
+            const width = parseInt(prompt('Bundle width:', '1') || '1', 10)
+            const name = prompt('Bundle name:', 'BUS')
+            if (!name) return
+            addWireToBundle(wireId, name, width)
+            refreshHUD()
           }
-        }
-        asmBtns.appendChild(assembleBtn)
+          hud.appendChild(bundleBtn)
 
-        const asmLoadBtn = document.createElement('button')
-        asmLoadBtn.className = 'action'
-        asmLoadBtn.innerText = 'Load to ROM'
-        asmLoadBtn.onclick = () => {
-          try {
-            const target =
-              prompt('Target ROM component id:', components.find((c) => c.type === 'ROM')?.id) ||
-              null
-            if (!target) return
-            loadAssemblyIntoRom(target, assemblerState.isaText, assemblerState.sourceText)
-            alert(`Loaded ${assemblerState.lastBytes.length} bytes into ${target}`)
-          } catch (err) {
-            alert(err?.message || 'Load failed')
+          const bundleList = document.createElement('div')
+          bundleList.style.fontSize = '10px'
+          bundleList.style.color = '#94a3b8'
+          bundleList.id = 'bundle-list'
+          listBundles().forEach((b) => {
+            const row = document.createElement('div')
+            row.textContent = `${b.name} (${b.width}-bit) [${b.members.length}]`
+            bundleList.appendChild(row)
+          })
+          hud.appendChild(bundleList)
+
+          const tbLabel = document.createElement('div')
+          tbLabel.style.fontSize = '11px'
+          tbLabel.style.color = '#cbd5f5'
+          tbLabel.textContent = 'Testbench Sequencer'
+          hud.appendChild(tbLabel)
+
+          const tbArea = document.createElement('textarea')
+          tbArea.className = 'themed-input'
+          tbArea.style.height = '90px'
+          tbArea.value = testbench.script
+          tbArea.onchange = (e) => {
+            try {
+              const parsed = setTestbenchScript(e.target.value)
+              tbStatus.textContent = `Loaded ${parsed.length} steps`
+              tbArea.value = testbench.script
+            } catch (err) {
+              tbStatus.textContent = 'Invalid sequence'
+            }
           }
-        }
-        asmBtns.appendChild(asmLoadBtn)
-        hud.appendChild(asmBtns)
+          hud.appendChild(tbArea)
 
-        const asmStatus = document.createElement('div')
-        asmStatus.style.fontSize = '10px'
-        asmStatus.style.color = '#94a3b8'
-        asmStatus.textContent = `Last assemble: ${assemblerState.lastBytes.length} bytes`
-        hud.appendChild(asmStatus)
+          const tbButtons = document.createElement('div')
+          tbButtons.style.display = 'flex'
+          tbButtons.style.gap = '6px'
+          tbButtons.style.flexWrap = 'wrap'
+
+          const tbRun = document.createElement('button')
+          tbRun.className = 'action'
+          tbRun.innerText = 'Run Sequence'
+          tbRun.onclick = () => {
+            try {
+              const parsed = setTestbenchScript(tbArea.value)
+              const res = runTestbench(parsed)
+              tbArea.value = testbench.script
+              tbStatus.textContent = res.passed
+                ? `PASS in ${res.ticks} ticks`
+                : `FAIL (${res.failures.length})`
+            } catch (err) {
+              tbStatus.textContent = 'Invalid sequence'
+            }
+          }
+          tbButtons.appendChild(tbRun)
+
+          const tbStop = document.createElement('button')
+          tbStop.className = 'action'
+          tbStop.innerText = 'Stop'
+          tbStop.onclick = () => {
+            stopTestbench()
+            tbStatus.textContent = 'Stopped'
+          }
+          tbButtons.appendChild(tbStop)
+
+          const tbCopy = document.createElement('button')
+          tbCopy.className = 'action'
+          tbCopy.innerText = 'Copy Sequence'
+          tbCopy.onclick = async () => {
+            try {
+              await navigator.clipboard.writeText(testbench.script)
+            } catch (err) {
+              console.warn('Copy failed', err)
+            }
+          }
+          tbButtons.appendChild(tbCopy)
+          hud.appendChild(tbButtons)
+
+          const tbStatus = document.createElement('div')
+          tbStatus.style.fontSize = '11px'
+          tbStatus.style.color = '#aaa'
+          if (testbench.lastResult) {
+            tbStatus.textContent = testbench.lastResult.passed
+              ? `PASS in ${testbench.lastResult.ticks} ticks`
+              : `FAIL (${testbench.lastResult.failures.length})`
+          } else {
+            tbStatus.textContent = 'Idle'
+          }
+          hud.appendChild(tbStatus)
+
+          const asmLabel = document.createElement('div')
+          asmLabel.style.fontSize = '11px'
+          asmLabel.style.color = '#cbd5f5'
+          asmLabel.textContent = 'Assembler & Hex'
+          hud.appendChild(asmLabel)
+
+          const isaArea = document.createElement('textarea')
+          isaArea.className = 'themed-input'
+          isaArea.style.height = '60px'
+          isaArea.id = 'asm-isa'
+          isaArea.value = assemblerState.isaText
+          isaArea.onchange = (e) => {
+            assemblerState.isaText = e.target.value
+          }
+          hud.appendChild(isaArea)
+
+          const asmArea = document.createElement('textarea')
+          asmArea.className = 'themed-input'
+          asmArea.style.height = '60px'
+          asmArea.id = 'asm-source'
+          asmArea.value = assemblerState.sourceText
+          asmArea.onchange = (e) => {
+            assemblerState.sourceText = e.target.value
+          }
+          hud.appendChild(asmArea)
+
+          const asmBtns = document.createElement('div')
+          asmBtns.className = 'asm-buttons'
+
+          const assembleBtn = document.createElement('button')
+          assembleBtn.className = 'action'
+          assembleBtn.innerText = 'Assemble'
+          assembleBtn.onclick = () => {
+            try {
+              assemblerState.lastBytes = Array.from(
+                assembleSource(assemblerState.isaText, assemblerState.sourceText) || []
+              )
+            } catch (err) {
+              alert(err?.message || 'Assembly failed')
+            }
+          }
+          asmBtns.appendChild(assembleBtn)
+
+          const asmLoadBtn = document.createElement('button')
+          asmLoadBtn.className = 'action'
+          asmLoadBtn.innerText = 'Load to ROM'
+          asmLoadBtn.onclick = () => {
+            try {
+              const target =
+                prompt('Target ROM component id:', components.find((c) => c.type === 'ROM')?.id) ||
+                null
+              if (!target) return
+              loadAssemblyIntoRom(target, assemblerState.isaText, assemblerState.sourceText)
+              alert(`Loaded ${assemblerState.lastBytes.length} bytes into ${target}`)
+            } catch (err) {
+              alert(err?.message || 'Load failed')
+            }
+          }
+          asmBtns.appendChild(asmLoadBtn)
+          hud.appendChild(asmBtns)
+
+          const asmStatus = document.createElement('div')
+          asmStatus.style.fontSize = '10px'
+          asmStatus.style.color = '#94a3b8'
+          asmStatus.textContent = `Last assemble: ${assemblerState.lastBytes.length} bytes`
+          hud.appendChild(asmStatus)
+        }
 
         const selectBtn = document.createElement('button')
         selectBtn.className = mode === 'SELECTING' ? 'action active' : 'action'
@@ -2984,11 +3044,13 @@ const canvas = document.getElementById('canvas')
       }
 
       function undoEdit() {
+        if (!proMode) return false
         if (historyIndex <= 0) return false
         return restoreHistoryState(historyIndex - 1)
       }
 
       function redoEdit() {
+        if (!proMode) return false
         if (historyIndex >= historyStack.length - 1) return false
         return restoreHistoryState(historyIndex + 1)
       }
@@ -3218,6 +3280,7 @@ const canvas = document.getElementById('canvas')
       }
 
       function addBreakpoint(expr) {
+        if (!proMode) return null
         if (!expr) return null
         const bp = {
           id: makeId('bp'),
@@ -3246,6 +3309,10 @@ const canvas = document.getElementById('canvas')
       }
 
       function checkBreakpoints() {
+        if (!proMode) {
+          lastBreakpointHit = null
+          return
+        }
         lastBreakpointHit = null
         breakpoints.forEach((bp) => {
           if (!bp.enabled || !bp.expr) return
@@ -3280,7 +3347,8 @@ const canvas = document.getElementById('canvas')
         return entry
       }
 
-      function addWireToBundle(wireId, bundleName, width) {
+      function addWireToBundle(wireId, bundleName, width, force = false) {
+        if (!proMode && !force) return false
         const wire = wires.find((w) => w.id === wireId)
         if (!wire) return false
         const targetWidth = width || wire.bitWidth
@@ -3383,6 +3451,7 @@ const canvas = document.getElementById('canvas')
       }
 
       function assembleSource(defs, source) {
+        if (!proMode) throw new Error('Assembler is available in Pro mode only')
         const isa = normalizeIsaDefinitions(defs)
         const src = typeof source === 'string' ? source : ''
         const bytes = []
@@ -3469,6 +3538,7 @@ const canvas = document.getElementById('canvas')
       }
 
       function exportVerilog(moduleName = 'circuit') {
+        if (!proMode) throw new Error('Verilog export is available in Pro mode only')
         const modName = sanitizeId(moduleName)
         const compById = new Map(components.map((c) => [c.id, c]))
         const wireToInput = new Map()
@@ -3763,7 +3833,7 @@ const canvas = document.getElementById('canvas')
           if (!wireObj.path) applyAutoRoute(wireObj)
           wires.push(wireObj)
           if (wireObj.bundle) {
-            addWireToBundle(wireObj.id, wireObj.bundle, wireObj.bitWidth)
+            addWireToBundle(wireObj.id, wireObj.bundle, wireObj.bitWidth, true)
           }
         })
         setMainContext(components, wires)
@@ -4696,6 +4766,7 @@ const canvas = document.getElementById('canvas')
 
       window.addEventListener('keydown', (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+          if (!proMode) return
           e.preventDefault()
           if (e.shiftKey) {
             redoEdit()
@@ -4925,6 +4996,9 @@ const canvas = document.getElementById('canvas')
       }
 
       function init() {
+        proMode = loadModePreference()
+        applyModeSettings()
+        persistModePreference()
         canvas.width = window.innerWidth
         canvas.height = window.innerHeight
         initModeToggle()
