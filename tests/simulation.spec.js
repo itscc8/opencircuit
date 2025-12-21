@@ -10,11 +10,16 @@ function readFixture(name) {
   return JSON.parse(fs.readFileSync(file, 'utf8'))
 }
 
-async function gotoApp(page) {
-  await page.goto(indexUrl)
-  await page.waitForFunction(() => typeof window.CircuitAPI !== 'undefined')
-  await page.evaluate(() => window.CircuitAPI.pause())
-}
+  async function gotoApp(page, { mode = 'pro' } = {}) {
+    await page.goto(indexUrl)
+    await page.waitForFunction(() => typeof window.CircuitAPI !== 'undefined')
+    if (mode === 'pro') {
+      await page.getByRole('button', { name: 'Pro' }).click()
+    } else if (mode === 'easy') {
+      await page.getByRole('button', { name: 'Easy' }).click()
+    }
+    await page.evaluate(() => window.CircuitAPI.pause())
+  }
 
 async function loadFixture(page, name) {
   const data = readFixture(name)
@@ -23,6 +28,21 @@ async function loadFixture(page, name) {
 }
 
 test.describe('Discrete tick simulation', () => {
+  test('defaults to easy mode and remembers selection', async ({ page }) => {
+    await page.goto(indexUrl)
+    await page.waitForFunction(() => typeof window.CircuitAPI !== 'undefined')
+
+    await expect(page.getByRole('button', { name: 'Easy' })).toHaveClass(/active/)
+    await expect(page.getByRole('button', { name: 'Export Verilog' })).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Pro' }).click()
+    await expect(page.getByRole('button', { name: 'Pro' })).toHaveClass(/active/)
+
+    await page.reload()
+    await page.waitForFunction(() => typeof window.CircuitAPI !== 'undefined')
+    await expect(page.getByRole('button', { name: 'Pro' })).toHaveClass(/active/)
+  })
+
   test('ring oscillator toggles every tick', async ({ page }) => {
     await gotoApp(page)
     await loadFixture(page, 'not_loop')
@@ -284,15 +304,25 @@ test.describe('Discrete tick simulation', () => {
     expect(pixelSum).toBeGreaterThan(CROSSHAIR_PIXEL_THRESHOLD)
   })
 
-  test('mode switch limits palette to basics in easy and restores in pro', async ({
-    page,
-  }) => {
-    await gotoApp(page)
-    await expect(page.locator('#hud button:has-text("RAM")')).toBeVisible()
-    await page.getByRole('button', { name: 'Easy' }).click()
-    await expect(page.locator('#hud button:has-text("RAM")')).toHaveCount(0)
+  test('easy mode hides advanced tools and pro restores them', async ({ page }) => {
+    await gotoApp(page, { mode: 'easy' })
+
+    await expect(page.getByRole('button', { name: 'Export Verilog' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Logic Analyzer' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Pause|Resume/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Run DRC/ })).toHaveCount(0)
+    await expect(page.getByText('Coverage Heatmap')).toHaveCount(0)
+    const romButton = page.locator('#hud button', { hasText: /^ROM$/ })
+    await expect(romButton).toHaveCount(0)
+
     await page.getByRole('button', { name: 'Pro' }).click()
-    await expect(page.locator('#hud button:has-text("RAM")')).toBeVisible()
+
+    await expect(page.getByRole('button', { name: 'Export Verilog' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Logic Analyzer' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Pause|Resume/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Run DRC/ })).toBeVisible()
+    await expect(page.getByText('Coverage Heatmap')).toBeVisible()
+    await expect(romButton).toBeVisible()
   })
 
   test('memory primitives support load/save and runtime writes', async ({ page }) => {
