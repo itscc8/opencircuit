@@ -169,17 +169,7 @@ const canvas = document.getElementById('canvas')
 
       // Basic gates available when Easy mode is active.
       const MODE_STORAGE_KEY = 'oc_mode'
-      const BASIC_TOOL_KEYS = new Set([
-        'INPUT',
-        'OUTPUT',
-        'NOT',
-        'AND',
-        'NAND',
-        'OR',
-        'NOR',
-        'XOR',
-        'XNOR',
-      ])
+      // Easy mode keeps all logic tools available except explicitly disabled advanced parts.
       const EASY_DISABLED_TOOLS = new Set(['ROM'])
       let proMode = true
       let components = []
@@ -355,6 +345,7 @@ const canvas = document.getElementById('canvas')
       }
 
       // Returns true if a tool should be available in the current mode.
+      // Easy mode keeps logic tools accessible while filtering explicit advanced components.
       function toolEnabled(key) {
         if (customLibrary[key]) return true
         if (proMode) return true
